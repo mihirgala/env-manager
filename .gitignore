@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Tauri
+src-tauri/target/
+src-tauri/WixTools/
+src-tauri/gen/
+
+# Vite
+.vite/
+vite.config.*.timestamp-*
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# Env (never commit real secrets)
+.env
+.env.*
+!.env.example
+
+# Local vault / dev artifacts (this app manages .env files — it never commits them)
+.vault/
+*.backup-*
+vault.db
+cache/
