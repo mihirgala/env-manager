@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import { Layout } from '@/components/layout'
+import { ToastProvider } from '@/components/toaster'
 import { AddProjectScreen } from '@/screens/add-project'
 import { ProjectDetailScreen } from '@/screens/project-detail'
 import { ProjectsScreen } from '@/screens/projects'
@@ -26,6 +27,8 @@ if (rootEl === null) throw new Error('#root element missing in index.html')
 
 createRoot(rootEl).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    <ToastProvider>
+      <RouterProvider router={router} />
+    </ToastProvider>
   </StrictMode>,
 )

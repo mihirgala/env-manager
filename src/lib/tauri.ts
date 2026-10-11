@@ -26,21 +26,124 @@ export async function pickProjectFolder(): Promise<string | null> {
   return typeof picked === 'string' ? picked : null
 }
 
+export interface ProjectRow {
+  id: string
+  identity: string
+  displayName: string
+  folderPath: string
+  localOnly: boolean
+  createdAt: string
+}
+
+export interface EnvSetRow {
+  id: string
+  projectId: string
+  fileName: string
+  sha256: string
+  updatedAt: string
+}
+
+export interface FileStat {
+  mtimeMs: number
+  size: number
+}
+
+async function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (!isTauri()) needsTauri(command)
+  const { invoke: tauriInvoke } = await import('@tauri-apps/api/core')
+  return tauriInvoke<T>(command, args)
+}
+
 export async function readEnvFile(path: string): Promise<string> {
-  if (!isTauri()) needsTauri('readEnvFile')
-  const { invoke } = await import('@tauri-apps/api/core')
   return invoke<string>('read_env_file', { path })
 }
 
 export async function writeEnvFile(path: string, content: string): Promise<void> {
-  if (!isTauri()) needsTauri('writeEnvFile')
-  const { invoke } = await import('@tauri-apps/api/core')
   await invoke('write_env_file', { path, content })
 }
 
 /** Returns the `origin` remote URL, or null when the folder has no remote. */
 export async function getGitRemote(folderPath: string): Promise<string | null> {
-  if (!isTauri()) needsTauri('getGitRemote')
-  const { invoke } = await import('@tauri-apps/api/core')
   return invoke<string | null>('git_remote_get_url', { path: folderPath })
+}
+
+/** `.env*` file names directly inside a folder, sorted. */
+export async function listEnvFiles(folderPath: string): Promise<string[]> {
+  return invoke<string[]>('list_env_files', { folderPath })
+}
+
+/** mtime + size, or null when missing. Basis of the P1 watcher poll. */
+export async function fileStat(path: string): Promise<FileStat | null> {
+  return invoke<FileStat | null>('file_stat', { path })
+}
+
+/** Copies `<path>` to `<path>.backup-<ts>`; returns the backup path. */
+export async function backupEnvFile(path: string): Promise<string> {
+  return invoke<string>('backup_env_file', { path })
+}
+
+export async function projectAdd(input: {
+  identity: string
+  displayName: string
+  folderPath: string
+}): Promise<ProjectRow> {
+  return invoke<ProjectRow>('project_add', input)
+}
+
+export async function projectList(): Promise<ProjectRow[]> {
+  return invoke<ProjectRow[]>('project_list')
+}
+
+export async function projectGet(id: string): Promise<ProjectRow | null> {
+  return invoke<ProjectRow | null>('project_get', { id })
+}
+
+/** Unlinks the project. Vault rows only — `.env` files stay intact. */
+export async function projectRemove(id: string): Promise<void> {
+  await invoke('project_remove', { id })
+}
+
+export async function projectSetLocalOnly(id: string, localOnly: boolean): Promise<void> {
+  await invoke('project_set_local_only', { id, localOnly })
+}
+
+export async function envsetUpsert(input: {
+  projectId: string
+  fileName: string
+  sha256: string
+}): Promise<EnvSetRow> {
+  return invoke<EnvSetRow>('envset_upsert', input)
+}
+
+export async function envsetList(projectId: string): Promise<EnvSetRow[]> {
+  return invoke<EnvSetRow[]>('envset_list', { projectId })
+}
+
+export async function linksRead(): Promise<Record<string, string>> {
+  return invoke<Record<string, string>>('links_read')
+}
+
+export async function linksWrite(value: Record<string, string>): Promise<void> {
+  await invoke('links_write', { value })
+}
+
+/** Whole `config.json` as a plain object (TS owns the shape). */
+export async function configRead(): Promise<Record<string, unknown>> {
+  return invoke<Record<string, unknown>>('config_read')
+}
+
+export async function configWrite(value: Record<string, unknown>): Promise<void> {
+  await invoke('config_write', { value })
+}
+
+export async function keychainSet(service: string, account: string, secret: string): Promise<void> {
+  await invoke('keychain_set', { service, account, secret })
+}
+
+export async function keychainGet(service: string, account: string): Promise<string | null> {
+  return invoke<string | null>('keychain_get', { service, account })
+}
+
+export async function keychainDelete(service: string, account: string): Promise<void> {
+  await invoke('keychain_delete', { service, account })
 }
