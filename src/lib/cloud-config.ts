@@ -16,6 +16,11 @@ import { SupabaseCloudClient } from './cloud'
 import { isTauri, configRead, configWrite } from './tauri'
 import { CloudNotConfiguredError } from './sync'
 
+export interface KnownDevice {
+  name: string
+  lastSeen: string
+}
+
 export interface AppConfig {
   deviceName?: string
   cryptoSalt?: string
@@ -23,6 +28,9 @@ export interface AppConfig {
   cloudUrl?: string
   cloudKey?: string
   lastSynced?: Record<string, string>
+  /** Local registry of devices seen pushing (P3 display; cloud truth is snapshots). */
+  devices?: KnownDevice[]
+  seenOnboarding?: boolean
 }
 
 export async function loadConfig(): Promise<AppConfig> {

@@ -6,7 +6,7 @@ import { sha256Hex } from '@/lib/hash'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import { backupEnvFile, isTauri, readEnvFile, writeEnvFile } from '@/lib/tauri'
 import { isUnlocked } from '@/lib/crypto'
-import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient } from '@/lib/cloud-config'
+import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
 import { projectStatus, type SyncStatus } from '@/lib/sync'
 import * as React from 'react'
 
@@ -25,6 +25,7 @@ export function ProjectsScreen(): React.JSX.Element {
   const toast = useToast()
   const [projects, setProjects] = React.useState<ProjectRecord[] | null>(null)
   const [failed, setFailed] = React.useState(false)
+  const [showOnboarding, setShowOnboarding] = React.useState(false)
 
   React.useEffect(() => {
     let cancelled = false
@@ -71,6 +72,15 @@ export function ProjectsScreen(): React.JSX.Element {
         if (!cancelled) {
           setProjects(withStatus.map((x) => x.p))
           setStatuses(Object.fromEntries(withStatus.map((x) => [x.p.id, x.status])))
+          if (withStatus.length === 0) {
+            loadConfig()
+              .then((cfg) => {
+                if (!cancelled && (cfg as Record<string, unknown>)['seenOnboarding'] !== true) {
+                  setShowOnboarding(true)
+                }
+              })
+              .catch(() => {})
+          }
         }
       })
       .catch((err: unknown) => {
@@ -121,6 +131,31 @@ export function ProjectsScreen(): React.JSX.Element {
         <p role="alert" className="text-sm text-destructive">
           Could not load the vault. Is the desktop backend reachable?
         </p>
+      )}
+
+      {showOnboarding && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Welcome — local-first, no lock-in</CardTitle>
+            <CardDescription>
+              This app is a sidecar: your <code>.env</code> files stay the source of truth, nothing
+              is added to your repos, and local-only mode needs no account. Add a folder, edit
+              values in place, and optionally back up encrypted to Supabase later.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <button
+              type="button"
+              onClick={() => {
+                setShowOnboarding(false)
+                saveConfig({ seenOnboarding: true }).catch(() => {})
+              }}
+              className="inline-flex min-h-[44px] items-center rounded-md bg-secondary px-4 text-sm font-medium text-secondary-foreground"
+            >
+              Got it
+            </button>
+          </CardContent>
+        </Card>
       )}
 
       {projects !== null && projects.length === 0 && !failed && (

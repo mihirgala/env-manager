@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { recoverWithCode, unlock } from '@/lib/crypto'
+import { loadConfig } from '@/lib/cloud-config'
 
 /** Shown by the auth gate when encryption is set up but the vault is locked. */
 export function UnlockScreen({ salt, setupSalt, onUnlocked }: {
@@ -22,7 +23,6 @@ export function UnlockScreen({ salt, setupSalt, onUnlocked }: {
       if (mode === 'passphrase') {
         await unlock(value, salt)
       } else {
-        const { loadConfig } = await import('@/lib/cloud-config')
         const cfg = await loadConfig()
         if (cfg.recoveryBlob === undefined) throw new Error('No recovery blob stored on this device.')
         await recoverWithCode(value, cfg.recoveryBlob, setupSalt)

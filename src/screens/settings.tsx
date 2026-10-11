@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
-import { isTauri, configRead, configWrite, readEnvFile } from '@/lib/tauri'
+import { isTauri, configRead, configWrite, listEnvFiles, readEnvFile } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import {
   generateRecoveryKey,
@@ -42,6 +42,8 @@ export function SettingsScreen(): React.JSX.Element {
   const [otpEmail, setOtpEmail] = React.useState('')
   const [otpCode, setOtpCode] = React.useState('')
   const [otpSent, setOtpSent] = React.useState(false)
+  const [knownDevices, setKnownDevices] = React.useState<{ name: string; lastSeen: string }[]>([])
+  const [cloudDevices, setCloudDevices] = React.useState<{ name: string; lastPush: string }[]>([])
 
   React.useEffect(() => {
     if (!isTauri()) return
@@ -58,10 +60,21 @@ export function SettingsScreen(): React.JSX.Element {
         if (typeof cfg.cloudKey === 'string') setCloudKey(cfg.cloudKey)
         const on = isCloudConfigured(cfg)
         setCloudOn(on)
+        setKnownDevices(cfg.devices ?? [])
         if (on) {
           try {
             const client = new SupabaseCloudClient((cfg.cloudUrl as string).trim(), (cfg.cloudKey as string).trim())
             setSessionEmail(await client.sessionEmail())
+            // Devices seen in cloud snapshots (read-only server truth).
+            const seen = new Map<string, string>()
+            for (const p of await client.listProjects()) {
+              const snap = await client.latestSnapshot(p.id).catch(() => null)
+              if (snap?.deviceName !== null && snap?.deviceName !== undefined) {
+                const prev = seen.get(snap.deviceName)
+                if (prev === undefined || snap.createdAt > prev) seen.set(snap.deviceName, snap.createdAt)
+              }
+            }
+            setCloudDevices([...seen.entries()].map(([name, lastPush]) => ({ name, lastPush })))
           } catch {
             setSessionEmail(null)
           }
@@ -104,6 +117,17 @@ export function SettingsScreen(): React.JSX.Element {
     lock()
     setUnlocked(false)
     toast('Locked.')
+  }
+
+  async function forgetDevice(name: string): Promise<void> {
+    try {
+      const cfg = await loadConfig()
+      await saveConfig({ devices: (cfg.devices ?? []).filter((d) => d.name !== name) })
+      setKnownDevices((all) => all.filter((d) => d.name !== name))
+      toast(`Forgot ${name} locally. (Cloud snapshots keep their device label.)`)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Forget failed', 'error')
+    }
   }
 
   async function saveCloud(): Promise<void> {
@@ -161,15 +185,25 @@ export function SettingsScreen(): React.JSX.Element {
   }
 
   async function exportAll(): Promise<void> {
-    // Plaintext backup per project. Export never touches cloud state.
+    // Plaintext backup per project, all .env* files. Export never touches cloud state.
     try {
       for (const p of projects) {
         const sep = p.folderPath.includes('/') ? '/' : '\\'
+        const base = p.folderPath.replace(/[\\/]+$/, '')
+        let names = ['.env']
         try {
-          const content = await readEnvFile(`${p.folderPath.replace(/[\\/]+$/, '')}${sep}.env`)
-          downloadFile(`${p.displayName}.env.export`, content)
+          const found = await listEnvFiles(p.folderPath)
+          if (found.length > 0) names = found
         } catch {
-          toast(`Skipped ${p.displayName} — .env not readable.`, 'error')
+          // fall back to .env
+        }
+        for (const name of names) {
+          try {
+            const content = await readEnvFile(`${base}${sep}${name}`)
+            downloadFile(`${p.displayName}.${name}.export`, content)
+          } catch {
+            toast(`Skipped ${p.displayName}/${name} — not readable.`, 'error')
+          }
         }
       }
       toast('Export downloaded per project.')
@@ -348,6 +382,42 @@ export function SettingsScreen(): React.JSX.Element {
               )}
             </>
           )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Devices</CardTitle>
+          <CardDescription>
+            This device plus every device seen pushing to your cloud snapshots.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          <p className="text-sm">
+            This device: <code>{deviceName !== '' ? deviceName : '(unnamed)'}</code>
+          </p>
+          {knownDevices.length === 0 && cloudDevices.length === 0 && (
+            <p className="text-sm text-muted-foreground">No other devices seen yet.</p>
+          )}
+          {knownDevices.map((d) => (
+            <div key={d.name} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
+              <span className="mr-auto min-w-0 truncate text-sm">
+                <code>{d.name}</code> <span className="text-muted-foreground">· last push {d.lastSeen}</span>
+              </span>
+              <Button type="button" variant="outline" onClick={() => forgetDevice(d.name)}>
+                Forget
+              </Button>
+            </div>
+          ))}
+          {cloudDevices
+            .filter((d) => !knownDevices.some((k) => k.name === d.name))
+            .map((d) => (
+              <div key={d.name} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
+                <span className="mr-auto min-w-0 truncate text-sm">
+                  <code>{d.name}</code> <span className="text-muted-foreground">· cloud snapshot {d.lastPush}</span>
+                </span>
+              </div>
+            ))}
         </CardContent>
       </Card>
 

@@ -38,3 +38,13 @@ link id → P1 saves the mapping to `links.json` + vault.
 **Push/Pull (P2):** encrypt locally → upload envelope → compare
 `plaintext_sha256` for `behind | ahead | diverged` → diff preview → backup +
 apply on confirm.
+
+## Team sharing (v2 design note — not in v1)
+
+Sharing one project's envs with teammates needs per-recipient key wrapping:
+each member's public key (X25519, registered in a new `member_keys` table)
+gets the project DEK sealed to it; snapshots gain a `wraps` map of
+`member_id → sealed DEK`. Revocation = drop the wrap + rotate the DEK and
+re-push. The v1 envelope shape already carries `v`/`algo` so wrapped-key
+envelopes can version forward without a migration. No shared vault, no shared
+passphrase in v1 — one owner per project (RLS `owner_id = auth.uid()`).

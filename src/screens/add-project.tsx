@@ -5,12 +5,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
 import { detectIdentity, normalizeGitRemote, type ProjectIdentity } from '@/lib/identity'
+import { isUnlocked } from '@/lib/crypto'
+import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
+import { applyPull, planPull } from '@/lib/sync'
 import {
+  backupEnvFile,
   getGitRemote,
   isTauri,
   linksRead,
   linksWrite,
   pickProjectFolder,
+  readEnvFile,
+  writeEnvFile,
 } from '@/lib/tauri'
 import { Vault, createMemoryDriver, createTauriDriver } from '@/lib/vault'
 
@@ -22,6 +28,8 @@ export function AddProjectScreen(): React.JSX.Element {
   const [result, setResult] = useState<ProjectIdentity | null>(null)
   const [error, setError] = useState<string>('')
   const [saving, setSaving] = useState(false)
+  const [cloudMatch, setCloudMatch] = useState<{ device: string; at: string } | null>(null)
+  const [pullOnAdd, setPullOnAdd] = useState(true)
 
   async function handlePick(): Promise<void> {
     setError('')
@@ -43,7 +51,30 @@ export function AddProjectScreen(): React.JSX.Element {
   function handleDetect(): void {
     setError('')
     try {
-      setResult(detectIdentity({ folderPath: folder, gitRemoteUrl: remote || undefined }))
+      const id = detectIdentity({ folderPath: folder, gitRemoteUrl: remote || undefined })
+      setResult(id)
+      setCloudMatch(null)
+      // P3 matching prompt: same repo in the cloud on a new laptop?
+      if (isTauri() && id.kind === 'git') {
+        loadConfig()
+          .then(async (cfg) => {
+            if (!isCloudConfigured(cfg) || !isUnlocked()) return
+            try {
+              const cloud = makeCloudClient(cfg)
+              const match = (await cloud.listProjects()).find((p) => p.identity === id.identity)
+              if (match === undefined) return
+              const snap = await cloud.latestSnapshot(match.id)
+              if (snap === null) return
+              setCloudMatch({
+                device: snap.deviceName ?? 'another device',
+                at: snap.createdAt,
+              })
+            } catch {
+              // Advisory only.
+            }
+          })
+          .catch(() => {})
+      }
     } catch (err) {
       setResult(null)
       setError(err instanceof Error ? err.message : 'Could not detect identity')
@@ -68,6 +99,27 @@ export function AddProjectScreen(): React.JSX.Element {
         const links = await linksRead().catch((): Record<string, string> => ({}))
         links[folder] = identity
         await linksWrite(links)
+      }
+      // Matched a cloud backup and the user opted in → pull .env now.
+      if (isTauri() && cloudMatch !== null && pullOnAdd && result.kind === 'git') {
+        try {
+          const cfg = await loadConfig()
+          const ctx = {
+            cloud: makeCloudClient(cfg),
+            io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+            lastSyncedSha: null,
+          }
+          const sep = folder.includes('/') ? '/' : '\\'
+          const filePath = `${folder.replace(/[\\/]+$/, '')}${sep}.env`
+          const plan = await planPull(ctx, { identity, projectId: row.id, filePath })
+          if (plan !== null) {
+            const { sha256 } = await applyPull(ctx, { identity, projectId: row.id, filePath })
+            await saveConfig({ lastSynced: { ...(cfg.lastSynced ?? {}), [lastSyncedKey(row.id, '.env')]: sha256 } })
+            toast('Pulled .env from the cloud backup.')
+          }
+        } catch (err) {
+          toast(err instanceof Error ? err.message : 'Auto-pull failed — pull manually from the project page.', 'error')
+        }
       }
       toast(`Added "${displayName}".`)
       navigate(`/project/${encodeURIComponent(row.id)}`)
@@ -133,6 +185,23 @@ export function AddProjectScreen(): React.JSX.Element {
                   No git remote — manual link id: <code>{result.id}</code> (stored in{' '}
                   <code>~/.env-manager/links.json</code>, never in your repo).
                 </p>
+              )}
+              {cloudMatch !== null && result.kind === 'git' && (
+                <div className="mt-2 rounded-md border bg-card p-3">
+                  <p>
+                    Found <code>{result.identity} (.env)</code> in the cloud — pushed from{' '}
+                    <code>{cloudMatch.device}</code> at {cloudMatch.at}. Pull it after adding?
+                  </p>
+                  <label className="mt-2 inline-flex min-h-[44px] cursor-pointer items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="h-5 w-5"
+                      checked={pullOnAdd}
+                      onChange={(e) => setPullOnAdd(e.target.checked)}
+                    />
+                    Pull .env on add (backs up any existing file first)
+                  </label>
+                </div>
               )}
             </div>
           )}

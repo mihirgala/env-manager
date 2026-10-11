@@ -1,0 +1,23 @@
+name: Bug report
+description: Report something broken in env-manager
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, and what went wrong? (Never paste real secret values.)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: e.g. v0.3, or the commit hash you built from
+  - type: checkboxes
+    id: lockin
+    attributes:
+      label: No-lock-in check
+      options:
+        - label: No files were added to my project repos by the app
+        - label: My .env files are intact

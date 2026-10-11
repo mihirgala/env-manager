@@ -281,7 +281,13 @@ export function ProjectDetailScreen(): React.JSX.Element {
         filePath: joinPath(project.folderPath, file),
         deviceName: (cfg.deviceName as string | undefined) ?? 'unknown-device',
       })
-      await saveConfig({ lastSynced: { ...(cfg.lastSynced ?? {}), [lastSyncedKey(project.id, file)]: sha256 } })
+      const seen = [...(cfg.devices ?? [])]
+      const deviceName = (cfg.deviceName as string | undefined) ?? 'unknown-device'
+      const at = new Date().toISOString()
+      const i = seen.findIndex((d) => d.name === deviceName)
+      if (i === -1) seen.push({ name: deviceName, lastSeen: at })
+      else seen[i] = { name: deviceName, lastSeen: at }
+      await saveConfig({ lastSynced: { ...(cfg.lastSynced ?? {}), [lastSyncedKey(project.id, file)]: sha256 }, devices: seen })
       setPullPlan(null)
       await refreshStatus()
       toast('Pushed — server saw ciphertext only.')
