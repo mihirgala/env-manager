@@ -41,9 +41,9 @@ It syncs your `.env` files between machines through encrypted cloud backup — *
 > v0.1 (P0) — scaffold: Tauri shell boots, folder picker + git-remote detect. **DONE** — see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 - [x] **P0 — scaffold:** app boots, Supabase migrations, add-project flow skeleton
-- [ ] **P1 — local:** SQLite vault, lossless `.env` view/edit, status badges, file watcher
-- [ ] **P2 — cloud E2E:** passphrase unlock + recovery key, encrypted push/pull, conflict backups
-- [ ] **P3 — polish:** multi-file sets (`.env`, `.env.local`), device list, export/unlink, team sharing prep (v2)
+- [x] **P1 — local:** SQLite vault, lossless `.env` view/edit, status badges, file watcher
+- [x] **P2 — cloud E2E:** passphrase unlock + recovery key, encrypted push/pull, conflict backups (live E2E needs your Supabase keys in Settings)
+- [x] **P3 — polish:** multi-file sets (`.env`, `.env.local`), device list, export/unlink, team sharing prep (v2)
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
 
