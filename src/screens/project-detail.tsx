@@ -11,7 +11,7 @@ import { sha256Hex } from '@/lib/hash'
 import { isTauri, backupEnvFile, fileStat, listEnvFiles, readEnvFile, writeEnvFile } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import { isUnlocked } from '@/lib/crypto'
-import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
+import { isCloudConfigured, ensureDeviceName, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
 import {
   applyPull,
   planPull,
@@ -230,7 +230,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
     if (project === null) return null
     const cfg = await loadConfig()
     if (!isCloudConfigured(cfg)) {
-      toast('Cloud not configured — add Supabase URL + key in Settings.', 'error')
+      toast('Cloud not configured — check Settings → Cloud.', 'error')
       return null
     }
     if (!isUnlocked()) {
@@ -274,15 +274,15 @@ export function ProjectDetailScreen(): React.JSX.Element {
       const ctx = await syncContext()
       if (ctx === null) return
       const cfg = await loadConfig()
+      const deviceName = await ensureDeviceName()
       const { sha256 } = await pushProject(ctx, {
         identity: project.identity,
         displayName: project.displayName,
         projectId: project.id,
         filePath: joinPath(project.folderPath, file),
-        deviceName: (cfg.deviceName as string | undefined) ?? 'unknown-device',
+        deviceName,
       })
       const seen = [...(cfg.devices ?? [])]
-      const deviceName = (cfg.deviceName as string | undefined) ?? 'unknown-device'
       const at = new Date().toISOString()
       const i = seen.findIndex((d) => d.name === deviceName)
       if (i === -1) seen.push({ name: deviceName, lastSeen: at })
@@ -392,7 +392,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
       )}
 
       {files.length > 1 && (
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="Env files">
+        <div className="flex max-w-full gap-1 overflow-x-auto pb-1" role="tablist" aria-label="Env files">
           {files.map((f) => (
             <button
               key={f}
@@ -408,7 +408,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
                 }
               }}
               className={cn(
-                'inline-flex min-h-[44px] items-center rounded-md px-3 text-sm font-medium',
+                'inline-flex min-h-[44px] shrink-0 items-center rounded-md px-3 text-sm font-medium',
                 f === file ? 'bg-secondary text-secondary-foreground' : 'hover:bg-accent',
               )}
             >

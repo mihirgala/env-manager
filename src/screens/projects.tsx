@@ -173,7 +173,7 @@ export function ProjectsScreen(): React.JSX.Element {
         </Card>
       )}
 
-      <ul className="grid grid-cols-1 gap-3 md:grid-cols-2">
+      <ul className="grid grid-cols-1 gap-3 min-[720px]:grid-cols-2">
         {(projects ?? []).map((p) => (
           <li key={p.id}>
             <Link

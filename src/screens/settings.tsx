@@ -1,8 +1,10 @@
 import * as React from 'react'
 import { Link } from 'react-router-dom'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import { GitHubSignInButton } from '@/components/github-sign-in'
 import { useToast } from '@/components/toaster'
 import { isTauri, configRead, configWrite, listEnvFiles, readEnvFile } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
@@ -12,8 +14,7 @@ import {
   lock,
   setupPassphrase,
 } from '@/lib/crypto'
-import { SupabaseCloudClient } from '@/lib/cloud'
-import { isCloudConfigured, loadConfig, saveConfig } from '@/lib/cloud-config'
+import { clearCustomCloud, effectiveCloudEndpoint, ensureDeviceName, hostedCloudEndpoint, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
 
 function downloadFile(name: string, text: string): void {
   const blob = new Blob([text], { type: 'text/plain' })
@@ -38,19 +39,19 @@ export function SettingsScreen(): React.JSX.Element {
   const [cloudUrl, setCloudUrl] = React.useState('')
   const [cloudKey, setCloudKey] = React.useState('')
   const [cloudOn, setCloudOn] = React.useState(false)
+  const [cloudSrc, setCloudSrc] = React.useState<'custom' | 'hosted' | null>(null)
+  const [hostedReady, setHostedReady] = React.useState(false)
+  const [testing, setTesting] = React.useState(false)
   const [sessionEmail, setSessionEmail] = React.useState<string | null>(null)
-  const [otpEmail, setOtpEmail] = React.useState('')
-  const [otpCode, setOtpCode] = React.useState('')
-  const [otpSent, setOtpSent] = React.useState(false)
+  const [signedIn, setSignedIn] = React.useState(false)
   const [knownDevices, setKnownDevices] = React.useState<{ name: string; lastSeen: string }[]>([])
   const [cloudDevices, setCloudDevices] = React.useState<{ name: string; lastPush: string }[]>([])
 
   React.useEffect(() => {
     if (!isTauri()) return
-    configRead()
-      .then((cfg) => {
-        if (typeof cfg['deviceName'] === 'string') setDeviceName(cfg['deviceName'])
-      })
+    // Device label comes from the OS hostname unless the user overrode it.
+    ensureDeviceName()
+      .then(setDeviceName)
       .catch(() => {})
     loadConfig()
       .then(async (cfg) => {
@@ -58,13 +59,17 @@ export function SettingsScreen(): React.JSX.Element {
         setUnlocked(isUnlocked())
         if (typeof cfg.cloudUrl === 'string') setCloudUrl(cfg.cloudUrl)
         if (typeof cfg.cloudKey === 'string') setCloudKey(cfg.cloudKey)
-        const on = isCloudConfigured(cfg)
+        const endpoint = effectiveCloudEndpoint(cfg)
+        const on = endpoint !== null
         setCloudOn(on)
+        setCloudSrc(endpoint?.source ?? null)
+        setHostedReady(hostedCloudEndpoint() !== null)
         setKnownDevices(cfg.devices ?? [])
         if (on) {
           try {
-            const client = new SupabaseCloudClient((cfg.cloudUrl as string).trim(), (cfg.cloudKey as string).trim())
+            const client = makeCloudClient(cfg)
             setSessionEmail(await client.sessionEmail())
+            setSignedIn(await client.isSignedIn())
             // Devices seen in cloud snapshots (read-only server truth).
             const seen = new Map<string, string>()
             for (const p of await client.listProjects()) {
@@ -77,6 +82,7 @@ export function SettingsScreen(): React.JSX.Element {
             setCloudDevices([...seen.entries()].map(([name, lastPush]) => ({ name, lastPush })))
           } catch {
             setSessionEmail(null)
+            setSignedIn(false)
           }
         }
       })
@@ -133,41 +139,59 @@ export function SettingsScreen(): React.JSX.Element {
   async function saveCloud(): Promise<void> {
     try {
       const cfg = await saveConfig({ cloudUrl: cloudUrl.trim(), cloudKey: cloudKey.trim() })
-      setCloudOn(isCloudConfigured(cfg))
-      toast('Cloud settings saved. Server sees ciphertext only.')
+      const endpoint = effectiveCloudEndpoint(cfg)
+      setCloudOn(endpoint !== null)
+      setCloudSrc(endpoint?.source ?? null)
+      toast('Custom backend saved. Server sees ciphertext only.')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Save failed', 'error')
     }
   }
 
-  async function sendOtp(): Promise<void> {
+  async function useHosted(): Promise<void> {
     try {
-      const client = new SupabaseCloudClient(cloudUrl.trim(), cloudKey.trim())
-      await client.signInWithEmail(otpEmail.trim())
-      setOtpSent(true)
-      toast('Check your email for the code.')
+      const cfg = await clearCustomCloud()
+      setCloudUrl('')
+      setCloudKey('')
+      const endpoint = effectiveCloudEndpoint(cfg)
+      setCloudOn(endpoint !== null)
+      setCloudSrc(endpoint?.source ?? null)
+      toast('Switched back to the managed cloud.')
     } catch (err) {
-      toast(err instanceof Error ? err.message : 'Sign-in failed', 'error')
+      toast(err instanceof Error ? err.message : 'Switch failed', 'error')
     }
   }
 
-  async function verifyOtp(): Promise<void> {
+  async function testConnection(): Promise<void> {
+    setTesting(true)
     try {
-      const client = new SupabaseCloudClient(cloudUrl.trim(), cloudKey.trim())
-      await client.verifyOtp(otpEmail.trim(), otpCode.trim())
-      setSessionEmail(await client.sessionEmail())
-      setOtpCode('')
-      toast('Signed in.')
+      const cfg = await loadConfig()
+      const client = makeCloudClient(cfg)
+      const ok = await client.isSignedIn().catch(() => false)
+      const projects = await client.listProjects()
+      if (ok) {
+        const email = await client.sessionEmail().catch(() => null)
+        toast(
+          email !== null
+            ? `Connected — signed in as ${email}, ${projects.length} cloud project(s).`
+            : `Connected — signed in with GitHub, ${projects.length} cloud project(s).`,
+        )
+      } else {
+        toast('Reachable, but not signed in — use Sign in with GitHub below.', 'error')
+      }
     } catch (err) {
-      toast(err instanceof Error ? err.message : 'Verify failed', 'error')
+      toast(err instanceof Error ? err.message : 'Connection failed', 'error')
+    } finally {
+      setTesting(false)
     }
   }
 
   async function signOut(): Promise<void> {
     try {
-      const client = new SupabaseCloudClient(cloudUrl.trim(), cloudKey.trim())
+      const client = makeCloudClient(await loadConfig())
       await client.signOut()
       setSessionEmail(null)
+      setSignedIn(false)
       toast('Signed out.')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Sign-out failed', 'error')
@@ -223,6 +247,37 @@ export function SettingsScreen(): React.JSX.Element {
     }
   }
 
+  const customBackendFields = (
+    <>
+      <Input
+        aria-label="Supabase URL"
+        placeholder="https://xyz.supabase.co"
+        autoComplete="off"
+        spellCheck={false}
+        value={cloudUrl}
+        onChange={(e) => setCloudUrl(e.target.value)}
+      />
+      <Input
+        aria-label="Supabase anon key"
+        placeholder="anon key"
+        autoComplete="off"
+        spellCheck={false}
+        value={cloudKey}
+        onChange={(e) => setCloudKey(e.target.value)}
+      />
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" variant="secondary" onClick={saveCloud} disabled={!isTauri()}>
+          Save custom backend
+        </Button>
+        {cloudSrc === 'custom' && hostedReady && (
+          <Button type="button" variant="outline" onClick={useHosted}>
+            Use managed cloud instead
+          </Button>
+        )}
+      </div>
+    </>
+  )
+
   return (
     <div className="flex flex-col gap-4">
       <h1 className="text-[clamp(1.25rem,2vw+1rem,1.75rem)] font-semibold tracking-tight">Settings</h1>
@@ -230,7 +285,7 @@ export function SettingsScreen(): React.JSX.Element {
       <Card>
         <CardHeader>
           <CardTitle>Device</CardTitle>
-          <CardDescription>Shown alongside cloud snapshots in P2.</CardDescription>
+          <CardDescription>From your OS hostname — override it if you like. Shown alongside cloud snapshots.</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2 sm:flex-row">
           <Input
@@ -309,76 +364,59 @@ export function SettingsScreen(): React.JSX.Element {
 
       <Card>
         <CardHeader>
-          <CardTitle>Cloud (optional)</CardTitle>
+          <CardTitle>Cloud sync</CardTitle>
           <CardDescription>
-            Local-only is the default and needs no account. With Supabase configured, the server
-            sees ciphertext only. Per-project <code>local-only</code> skips cloud entirely.
+            {cloudSrc === 'hosted' &&
+              'Managed cloud is built in — sign in below and Push. The server sees ciphertext only.'}
+            {cloudSrc === 'custom' && 'Using your own Supabase project. The server sees ciphertext only.'}
+            {cloudSrc === null &&
+              'This build has no cloud backend. Point at your own Supabase project below, or stay local-only (the default, no account needed).'}{' '}
+            Per-project <code>local-only</code> skips cloud entirely.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
-          <Input
-            aria-label="Supabase URL"
-            placeholder="https://xyz.supabase.co"
-            autoComplete="off"
-            spellCheck={false}
-            value={cloudUrl}
-            onChange={(e) => setCloudUrl(e.target.value)}
-          />
-          <Input
-            aria-label="Supabase anon key"
-            placeholder="anon key"
-            autoComplete="off"
-            spellCheck={false}
-            value={cloudKey}
-            onChange={(e) => setCloudKey(e.target.value)}
-          />
-          <div>
-            <Button type="button" variant="secondary" onClick={saveCloud} disabled={!isTauri()}>
-              Save cloud settings
-            </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant={cloudOn ? 'success' : 'secondary'}>
+              {cloudSrc === 'hosted' ? 'managed cloud' : cloudSrc === 'custom' ? 'self-hosted' : 'local-only'}
+            </Badge>
+            {cloudOn && (
+              <Button type="button" variant="outline" onClick={testConnection} disabled={!isTauri() || testing}>
+                {testing ? 'Testing…' : 'Test connection'}
+              </Button>
+            )}
           </div>
+          {cloudSrc !== 'hosted' && customBackendFields}
+          {cloudSrc === 'hosted' && (
+            <details className="rounded-md border p-3">
+              <summary className="min-h-[44px] cursor-pointer text-sm font-medium">
+                Use your own Supabase project instead
+              </summary>
+              <div className="mt-2 flex flex-col gap-3">{customBackendFields}</div>
+            </details>
+          )}
           {cloudOn && (
             <>
-              {sessionEmail !== null ? (
+              {signedIn ? (
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="mr-auto text-sm">
-                    Signed in as <code>{sessionEmail}</code>
+                    Signed in{sessionEmail !== null ? <> as <code>{sessionEmail}</code></> : ' with GitHub'}
                   </p>
                   <Button type="button" variant="outline" onClick={signOut}>
                     Sign out
                   </Button>
                 </div>
               ) : (
-                <>
-                  <div className="flex flex-col gap-2 sm:flex-row">
-                    <Input
-                      aria-label="Email"
-                      placeholder="you@example.com"
-                      autoComplete="email"
-                      value={otpEmail}
-                      onChange={(e) => setOtpEmail(e.target.value)}
-                      className="min-w-0 flex-1"
-                    />
-                    <Button type="button" variant="secondary" onClick={sendOtp} disabled={otpEmail.trim() === ''}>
-                      Send code
-                    </Button>
-                  </div>
-                  {otpSent && (
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <Input
-                        aria-label="Email code"
-                        placeholder="6-digit code"
-                        autoComplete="one-time-code"
-                        value={otpCode}
-                        onChange={(e) => setOtpCode(e.target.value)}
-                        className="min-w-0 flex-1 font-mono"
-                      />
-                      <Button type="button" onClick={verifyOtp} disabled={otpCode.trim() === ''}>
-                        Verify
-                      </Button>
-                    </div>
+                <div className="flex flex-col gap-2">
+                  <GitHubSignInButton
+                    onSignedIn={(s) => {
+                      setSessionEmail(s.email)
+                      setSignedIn(s.signedIn)
+                    }}
+                  />
+                  {!isTauri() && (
+                    <p className="text-sm text-muted-foreground">Sign-in needs the desktop app.</p>
                   )}
-                </>
+                </div>
               )}
             </>
           )}

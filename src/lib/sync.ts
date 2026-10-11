@@ -41,7 +41,7 @@ export interface CloudClient {
 
 export class CloudNotConfiguredError extends Error {
   constructor() {
-    super('sync: cloud not configured — add Supabase URL + key in Settings')
+    super('sync: cloud not configured — check Settings → Cloud')
   }
 }
 

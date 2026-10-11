@@ -67,6 +67,11 @@ export async function getGitRemote(folderPath: string): Promise<string | null> {
   return invoke<string | null>('git_remote_get_url', { path: folderPath })
 }
 
+/** OS device name (hostname) for snapshot labels. */
+export async function getDeviceName(): Promise<string> {
+  return invoke<string>('device_name')
+}
+
 /** `.env*` file names directly inside a folder, sorted. */
 export async function listEnvFiles(folderPath: string): Promise<string[]> {
   return invoke<string[]>('list_env_files', { folderPath })
@@ -146,4 +151,31 @@ export async function keychainGet(service: string, account: string): Promise<str
 
 export async function keychainDelete(service: string, account: string): Promise<void> {
   await invoke('keychain_delete', { service, account })
+}
+
+/**
+ * OAuth sign-in runs through the system browser + a pasted code
+ * (see `src/components/github-sign-in.tsx`). Kept for a future deep-link
+ * return path; the popup flow is currently unused.
+ */
+export async function openOAuthWindow(url: string): Promise<void> {
+  await invoke('open_oauth_window', { url })
+}
+
+/** Take (and clear) the pending OAuth `code`, or null when none yet. */
+export async function takeOAuthCode(): Promise<string | null> {
+  return invoke<string | null>('take_oauth_code')
+}
+
+export async function closeOAuthWindow(): Promise<void> {
+  await invoke('close_oauth_window').catch(() => {})
+}
+
+export async function isOAuthWindowOpen(): Promise<boolean> {
+  return invoke<boolean>('is_oauth_window_open')
+}
+
+/** Open a URL in the system browser (sign-in flow). */
+export async function openInBrowser(url: string): Promise<void> {
+  await invoke('open_in_browser', { url })
 }

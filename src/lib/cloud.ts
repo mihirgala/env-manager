@@ -21,11 +21,22 @@ interface SnapshotRow {
   created_at: string
 }
 
+/**
+ * OAuth redirect back to the desktop app. The host never resolves — the
+ * Tauri sign-in window intercepts it (see `open_oauth_window` in main.rs)
+ * before anything loads. Must be allowlisted in Supabase under
+ * Auth → URL Configuration → Redirect URLs.
+ */
+export const OAUTH_CALLBACK_URL = 'https://env-manager.local/auth/callback'
+
 export class SupabaseCloudClient implements CloudClient {
   private readonly client: SupabaseClient
 
   constructor(supabaseUrl: string, anonKey: string, accessToken?: string) {
     this.client = createClient(supabaseUrl, anonKey, {
+      // PKCE must be set here: auth-js reads flowType from client settings
+      // only (per-call options are ignored), and the default is implicit.
+      auth: { flowType: 'pkce' },
       global: accessToken !== undefined ? { headers: { Authorization: `Bearer ${accessToken}` } } : {},
     })
   }
@@ -45,9 +56,37 @@ export class SupabaseCloudClient implements CloudClient {
     await this.client.auth.signOut()
   }
 
+  /** GitHub OAuth sign-in URL for the desktop sign-in window (PKCE). */
+  async oAuthUrl(): Promise<string> {
+    const { data, error } = await this.client.auth.signInWithOAuth({
+      provider: 'github',
+      // NOTE: do NOT set skipBrowserRedirect here. It is a server directive:
+      // with it, /authorize returns the provider URL as JSON instead of
+      // redirecting — which renders as a blank page in the sign-in window.
+      // The app already avoids navigating the main window by loading this
+      // URL in the dedicated popup window instead.
+      options: { redirectTo: OAUTH_CALLBACK_URL },
+    })
+    if (error !== null) throw new Error(`supabase oauth: ${error.message}`)
+    if (data.url === '') throw new Error('supabase oauth: no sign-in URL returned')
+    return data.url
+  }
+
+  /** Exchange the intercepted callback `code` for a session (PKCE). */
+  async exchangeCodeForSession(code: string): Promise<void> {
+    const { error } = await this.client.auth.exchangeCodeForSession(code)
+    if (error !== null) throw new Error(`supabase oauth: ${error.message}`)
+  }
+
   async sessionEmail(): Promise<string | null> {
     const { data } = await this.client.auth.getSession()
     return data.session?.user.email ?? null
+  }
+
+  /** True when a session exists — independent of email visibility. */
+  async isSignedIn(): Promise<boolean> {
+    const { data } = await this.client.auth.getSession()
+    return data.session !== null
   }
 
   async listProjects(): Promise<CloudProject[]> {
