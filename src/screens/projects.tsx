@@ -4,15 +4,20 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/components/toaster'
 import { sha256Hex } from '@/lib/hash'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
-import { isTauri, readEnvFile } from '@/lib/tauri'
+import { backupEnvFile, isTauri, readEnvFile, writeEnvFile } from '@/lib/tauri'
+import { isUnlocked } from '@/lib/crypto'
+import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient } from '@/lib/cloud-config'
+import { projectStatus, type SyncStatus } from '@/lib/sync'
 import * as React from 'react'
 
-type RowStatus = 'local-only' | 'clean' | 'diverged' | 'unknown'
+type RowStatus = SyncStatus | 'unknown'
 
-const statusVariant: Record<RowStatus, 'secondary' | 'success' | 'warning' | 'outline'> = {
+const statusVariant: Record<RowStatus, 'secondary' | 'success' | 'warning' | 'outline' | 'destructive'> = {
   'local-only': 'secondary',
   clean: 'success',
-  diverged: 'warning',
+  behind: 'warning',
+  ahead: 'warning',
+  diverged: 'destructive',
   unknown: 'outline',
 }
 
@@ -28,15 +33,33 @@ export function ProjectsScreen(): React.JSX.Element {
       .listProjects()
       .then(async (rows) => {
         if (cancelled) return
-        // P1: compute clean/diverged per project from stored vs on-disk sha.
+        // Status: local-only flag wins; cloud behind/ahead when configured +
+        // unlocked; otherwise local clean/diverged from stored vs on-disk sha.
+        const cfg = await loadConfig().catch(() => null)
         const withStatus = await Promise.all(
           rows.map(async (p) => {
             if (p.localOnly) return { p, status: 'local-only' as RowStatus }
+            const sep = p.folderPath.includes('/') ? '/' : '\\'
+            const file = `${p.folderPath.replace(/[\\/]+$/, '')}${sep}.env`
+            if (cfg !== null && isCloudConfigured(cfg) && isUnlocked()) {
+              try {
+                const key = lastSyncedKey(p.id, '.env')
+                const st = await projectStatus(
+                  {
+                    cloud: makeCloudClient(cfg),
+                    io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+                    lastSyncedSha: cfg.lastSynced?.[key] ?? null,
+                  },
+                  { identity: p.identity, filePath: file, localOnly: false },
+                )
+                return { p, status: st as RowStatus }
+              } catch {
+                // fall through to local compare
+              }
+            }
             try {
               const sets = await vault.listEnvSets(p.id)
               const main = sets.find((s) => s.fileName === '.env') ?? sets[0]
-              const sep = p.folderPath.includes('/') ? '/' : '\\'
-              const file = `${p.folderPath}${sep}${main?.fileName ?? '.env'}`
               const content = await readEnvFile(file)
               const sha = await sha256Hex(content)
               return { p, status: (main !== undefined && main.sha256 !== '' && main.sha256 !== sha ? 'diverged' : 'clean') as RowStatus }

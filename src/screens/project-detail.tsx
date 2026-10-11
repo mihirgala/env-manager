@@ -1,4 +1,4 @@
-import { Check, Copy, Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
+import { Check, Copy, Eye, EyeOff, Plus, Trash2, CloudUpload, CloudDownload } from 'lucide-react'
 import * as React from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
@@ -10,6 +10,17 @@ import { effectiveValue, getValue, parse, serialize, setValue, type DotenvDocume
 import { sha256Hex } from '@/lib/hash'
 import { isTauri, backupEnvFile, fileStat, listEnvFiles, readEnvFile, writeEnvFile } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
+import { isUnlocked } from '@/lib/crypto'
+import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
+import {
+  applyPull,
+  planPull,
+  projectStatus,
+  pushProject,
+  type PullPlan,
+  type SyncContext,
+  type SyncStatus,
+} from '@/lib/sync'
 import { cn } from '@/lib/utils'
 
 function joinPath(folder: string, file: string): string {
@@ -44,6 +55,9 @@ export function ProjectDetailScreen(): React.JSX.Element {
   const [newValue, setNewValue] = React.useState('')
   const [error, setError] = React.useState('')
   const [saving, setSaving] = React.useState(false)
+  const [syncStatus, setSyncStatus] = React.useState<SyncStatus | null>(null)
+  const [syncBusy, setSyncBusy] = React.useState(false)
+  const [pullPlan, setPullPlan] = React.useState<PullPlan | null>(null)
 
   const loadFile = React.useCallback(
     async (p: ProjectRecord, fileName: string) => {
@@ -212,6 +226,124 @@ export function ProjectDetailScreen(): React.JSX.Element {
     toast('Export downloaded.')
   }
 
+  async function syncContext(): Promise<SyncContext | null> {
+    if (project === null) return null
+    const cfg = await loadConfig()
+    if (!isCloudConfigured(cfg)) {
+      toast('Cloud not configured — add Supabase URL + key in Settings.', 'error')
+      return null
+    }
+    if (!isUnlocked()) {
+      toast('Locked — unlock first.', 'error')
+      return null
+    }
+    const key = lastSyncedKey(project.id, file)
+    return {
+      cloud: makeCloudClient(cfg),
+      io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+      lastSyncedSha: cfg.lastSynced?.[key] ?? null,
+    }
+  }
+
+  async function refreshStatus(): Promise<void> {
+    if (project === null) return
+    try {
+      const cfg = await loadConfig()
+      if (!isCloudConfigured(cfg) || !isUnlocked() || project.localOnly) {
+        setSyncStatus(project.localOnly ? 'local-only' : dirty ? 'diverged' : 'clean')
+        return
+      }
+      const ctx = await syncContext()
+      if (ctx === null) return
+      setSyncStatus(
+        await projectStatus(ctx, {
+          identity: project.identity,
+          filePath: joinPath(project.folderPath, file),
+          localOnly: false,
+        }),
+      )
+    } catch {
+      // Status is advisory; explicit actions surface errors.
+    }
+  }
+
+  async function handlePush(): Promise<void> {
+    if (project === null) return
+    setSyncBusy(true)
+    try {
+      const ctx = await syncContext()
+      if (ctx === null) return
+      const cfg = await loadConfig()
+      const { sha256 } = await pushProject(ctx, {
+        identity: project.identity,
+        displayName: project.displayName,
+        projectId: project.id,
+        filePath: joinPath(project.folderPath, file),
+        deviceName: (cfg.deviceName as string | undefined) ?? 'unknown-device',
+      })
+      await saveConfig({ lastSynced: { ...(cfg.lastSynced ?? {}), [lastSyncedKey(project.id, file)]: sha256 } })
+      setPullPlan(null)
+      await refreshStatus()
+      toast('Pushed — server saw ciphertext only.')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Push failed', 'error')
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
+  async function handlePlanPull(): Promise<void> {
+    if (project === null) return
+    setSyncBusy(true)
+    try {
+      const ctx = await syncContext()
+      if (ctx === null) return
+      const plan = await planPull(ctx, {
+        identity: project.identity,
+        projectId: project.id,
+        filePath: joinPath(project.folderPath, file),
+      })
+      if (plan === null) {
+        toast('No cloud snapshot for this project yet — push first.')
+        return
+      }
+      setPullPlan(plan)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Pull failed', 'error')
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
+  async function handleApplyPull(): Promise<void> {
+    if (project === null || pullPlan === null) return
+    setSyncBusy(true)
+    try {
+      const ctx = await syncContext()
+      if (ctx === null) return
+      const { backupPath, sha256 } = await applyPull(ctx, {
+        identity: project.identity,
+        projectId: project.id,
+        filePath: joinPath(project.folderPath, file),
+      })
+      const cfg = await loadConfig()
+      await saveConfig({ lastSynced: { ...(cfg.lastSynced ?? {}), [lastSyncedKey(project.id, file)]: sha256 } })
+      await loadFile(project, file)
+      setPullPlan(null)
+      await refreshStatus()
+      toast(backupPath !== null ? `Pulled. Local backup: ${backupPath}` : 'Pulled.')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Apply failed', 'error')
+    } finally {
+      setSyncBusy(false)
+    }
+  }
+
+  React.useEffect(() => {
+    if (project !== null && doc !== null) void refreshStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.id, file, savedText])
+
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -219,6 +351,11 @@ export function ProjectDetailScreen(): React.JSX.Element {
           {project?.displayName ?? 'Project'}
         </h1>
         {project?.localOnly === true && <Badge variant="secondary">local-only</Badge>}
+        {syncStatus !== null && syncStatus !== 'local-only' && (
+          <Badge variant={syncStatus === 'clean' ? 'success' : syncStatus === 'diverged' ? 'destructive' : 'warning'}>
+            {syncStatus}
+          </Badge>
+        )}
         {dirty && <Badge variant="warning">unsaved changes</Badge>}
         {changedOnDisk && <Badge variant="destructive">changed on disk</Badge>}
       </div>
@@ -378,19 +515,75 @@ export function ProjectDetailScreen(): React.JSX.Element {
         <Button type="button" onClick={handleSave} disabled={!dirty || saving}>
           <Check aria-hidden /> {saving ? 'Saving…' : 'Save'}
         </Button>
-        <Button type="button" variant="secondary" onClick={handleBackup}>
+        <Button type="button" variant="secondary" onClick={handlePush} disabled={syncBusy || project?.localOnly === true}>
+          <CloudUpload aria-hidden /> Push
+        </Button>
+        <Button type="button" variant="secondary" onClick={handlePlanPull} disabled={syncBusy || project?.localOnly === true}>
+          <CloudDownload aria-hidden /> Pull…
+        </Button>
+        <Button type="button" variant="outline" onClick={handleBackup}>
           Backup now
         </Button>
         <Button type="button" variant="outline" onClick={downloadExport}>
           Export
         </Button>
         <Button type="button" variant="outline" onClick={handleToggleLocalOnly}>
-          {project?.localOnly === true ? 'Allow cloud (P2)' : 'Mark local-only'}
+          {project?.localOnly === true ? 'Allow cloud' : 'Mark local-only'}
         </Button>
         <Button type="button" variant="destructive" onClick={handleRemove}>
           <Trash2 aria-hidden /> Unlink
         </Button>
       </div>
+
+      {pullPlan !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Pull preview</CardTitle>
+            <CardDescription>
+              {pullPlan.conflict
+                ? 'Conflict: you have local edits the cloud does not know about. Applying backs up your file first — never a silent overwrite.'
+                : 'Changes from the cloud. Applying backs up your file first.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2 text-sm">
+            {pullPlan.diff.added.length === 0 &&
+              pullPlan.diff.removed.length === 0 &&
+              pullPlan.diff.changed.length === 0 && <p>Already in sync — nothing to apply.</p>}
+            {pullPlan.diff.added.length > 0 && (
+              <p>
+                <Badge variant="success">added</Badge>{' '}
+                {pullPlan.diff.added.map((k) => (
+                  <code key={k} className="mr-1">{k}</code>
+                ))}
+              </p>
+            )}
+            {pullPlan.diff.changed.length > 0 && (
+              <p>
+                <Badge variant="warning">changed</Badge>{' '}
+                {pullPlan.diff.changed.map((k) => (
+                  <code key={k} className="mr-1">{k}</code>
+                ))}
+              </p>
+            )}
+            {pullPlan.diff.removed.length > 0 && (
+              <p>
+                <Badge variant="destructive">removed</Badge>{' '}
+                {pullPlan.diff.removed.map((k) => (
+                  <code key={k} className="mr-1">{k}</code>
+                ))}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" onClick={handleApplyPull} disabled={syncBusy}>
+                {syncBusy ? 'Applying…' : 'Backup + apply'}
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setPullPlan(null)}>
+                Cancel
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   )
 }
