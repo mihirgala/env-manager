@@ -11,6 +11,13 @@ const config = {
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, './src'),
+      // libsodium-wrappers-sumo@0.7.16 ships a broken ESM wrapper (it does
+      // `import "./libsodium-sumo.mjs"`, a file missing from its own dist).
+      // Alias to the working CJS build; Vite pre-bundles it for the browser.
+      'libsodium-wrappers-sumo': path.resolve(
+        import.meta.dirname,
+        './node_modules/libsodium-wrappers-sumo/dist/modules-sumo/libsodium-wrappers.js',
+      ),
     },
   },
   // Tauri: fixed port + strictPort so `tauri dev` can find Vite reliably.
