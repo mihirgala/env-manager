@@ -344,7 +344,7 @@ export function AddProjectScreen(): React.JSX.Element {
                 setResult(null)
                 setExistingMatch(null)
               }}
-              placeholder="git remote origin (optional — auto-detected in the desktop app)"
+              placeholder="git remote origin (optional)"
               aria-label="Git remote origin"
             />
             <div className="flex flex-wrap gap-2">

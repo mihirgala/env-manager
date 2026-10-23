@@ -384,8 +384,9 @@ export function SettingsScreen(): React.JSX.Element {
         <CardHeader>
           <CardTitle>Encryption</CardTitle>
           <CardDescription>
-            Zero-knowledge: passphrase → Argon2id → master key → per-project keys. Your passphrase
-            is entered at every launch and never stored — not in the OS keychain, not on disk.
+            Zero-knowledge: passphrase → Argon2id → master key → portable per-file keys. Your
+            passphrase is entered at every launch and never stored — not in a system credential
+            store, not on disk.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
@@ -453,11 +454,19 @@ export function SettingsScreen(): React.JSX.Element {
             <code>~/.env-manager/vault.db</code>
           </p>
           <p>
-            {stats === null ? 'Reading vault…' : `${stats.snapshots.toLocaleString()} snapshots · ${formatBytes(stats.bytes)}`}
+            {!isTauri()
+              ? 'Vault stats appear in the desktop app.'
+              : stats === null
+                ? 'Reading vault…'
+                : `${stats.snapshots.toLocaleString()} snapshots · ${formatBytes(stats.bytes)}`}
           </p>
           <p>
             Last backup:{' '}
-            {stats?.lastBackup ? new Date(stats.lastBackup).toLocaleString() : 'none yet'}
+            {!isTauri()
+              ? '—'
+              : stats?.lastBackup
+                ? new Date(stats.lastBackup).toLocaleString()
+                : 'none yet'}
           </p>
           <p className="text-muted-foreground">
             Rows hold ciphertext envelopes plus a local plaintext hash used only for conflict

@@ -227,7 +227,7 @@ export function sidebarMenuButtonClass(options?: {
   className?: string
 }): string {
   return cn(
-    'flex min-h-[44px] w-full min-w-0 items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors md:min-h-9 md:py-1.5',
+    'flex min-h-[44px] w-full min-w-0 items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left text-sm font-medium transition-colors',
     'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
     'focus-visible:outline-2 focus-visible:outline-sidebar-ring',
     options?.isActive && 'bg-sidebar-accent text-sidebar-accent-foreground',

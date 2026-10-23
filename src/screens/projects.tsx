@@ -33,6 +33,10 @@ export function ProjectsScreen(): React.JSX.Element {
   const [statuses, setStatuses] = React.useState<Record<string, VaultStatus>>({})
 
   React.useEffect(() => {
+    if (!isTauri()) {
+      setProjects([])
+      return
+    }
     let cancelled = false
     const vault = new Vault(createTauriDriver())
     vault

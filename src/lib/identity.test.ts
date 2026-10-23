@@ -25,7 +25,7 @@ describe('normalizeGitRemote', () => {
       'gitlab.com/org/repo',
     )
   })
-  it('rejects empty and unparsable URLs', () => {
+  it('rejects empty and invalid remotes', () => {
     expect(() => normalizeGitRemote('')).toThrow()
     expect(() => normalizeGitRemote('just-a-name')).toThrow()
   })

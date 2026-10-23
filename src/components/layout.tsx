@@ -28,7 +28,7 @@ function Breadcrumb(): React.JSX.Element {
               {c.to !== undefined && !last ? (
                 <Link
                   to={c.to}
-                  className="shrink-0 rounded text-muted-foreground transition-colors hover:text-foreground"
+                  className="inline-flex min-h-[44px] shrink-0 items-center rounded text-muted-foreground transition-colors hover:text-foreground"
                 >
                   {c.label}
                 </Link>
