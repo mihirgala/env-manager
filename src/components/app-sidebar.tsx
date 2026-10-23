@@ -20,7 +20,13 @@ import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 const mainNav = [
   { to: '/', label: 'Projects', icon: FolderKanban, end: true, tooltip: 'Projects (all)' },
   { to: '/add', label: 'Add Project', icon: FolderPlus, end: false, tooltip: 'Add a project folder' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false, tooltip: 'Device, encryption, export' },
+  {
+    to: '/settings',
+    label: 'Settings',
+    icon: SettingsIcon,
+    end: false,
+    tooltip: 'Device, encryption, vault, appearance',
+  },
 ]
 
 function useCollapsed(): boolean {
@@ -190,7 +196,8 @@ export function AppSidebar(): React.JSX.Element {
       <SidebarFooter>
         {!collapsed && (
           <p className="rounded-lg bg-sidebar-accent/50 px-3 py-2 text-xs leading-relaxed text-sidebar-foreground/70">
-            Sidecar mode — <code>.env</code> stays the source of truth. Nothing is written into your repos.
+            Sidecar mode — <code>.env</code> stays the source of truth. Encrypted backups live in{' '}
+            <code>~/.env-manager/vault.db</code>.
           </p>
         )}
       </SidebarFooter>

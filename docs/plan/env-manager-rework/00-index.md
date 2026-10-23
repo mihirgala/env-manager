@@ -82,7 +82,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 3. SQLite vault + snapshots
 - [x] 4. Import/export bundles
 - [x] 5. Parent-folder scan
-- [ ] 6. Screens rewiring
+- [x] 6. Screens rewiring
 - [ ] 7. Dark mode
 - [ ] 8. Skills + docs
 - [ ] 9. Packaging + CI
@@ -114,6 +114,13 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   Rebuilt Add Project with folder/scan tabs, 360px-safe result cards, bulk add + optional
   backups. `pnpm test` (61) + `pnpm build` green; Rust not compiled locally (cargo absent) —
   CI validates the scan commands.
+- **2026-10-23 — step 6 done.** Project detail now shows vault status and supports Back up now,
+  Restore diff → backup + apply, encrypted bundle export/import (with bundle passphrase),
+  plaintext export/import with diff + automatic `.env.backup-<ts>`, plus Escape-to-close
+  previews. Settings gained vault stats, export-all bundles, bundle import routing/adding, and
+  the no-keychain copy; Projects gained Scan folder + clearer badges; Add Project reports
+  duplicate identities with a link. Shared `paths.ts`. `pnpm test` (63) + `pnpm build` green.
+  Appearance selector is intentionally left for step 7 (dark mode).
 
 ## Environment notes
 

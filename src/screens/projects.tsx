@@ -2,6 +2,8 @@ import { Link } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/components/toaster'
+import { trackableEnvFiles } from '@/lib/env-files'
+import { joinPath } from '@/lib/paths'
 import { createTauriStore } from '@/lib/store'
 import { projectStatus, type SyncContext, type VaultStatus } from '@/lib/sync'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
@@ -14,6 +16,13 @@ const statusVariant: Record<VaultStatus, 'success' | 'warning' | 'outline' | 'de
   changed: 'warning',
   'not-backed-up': 'outline',
   locked: 'outline',
+}
+
+const statusLabel: Record<VaultStatus, string> = {
+  'backed-up': 'backed up',
+  changed: 'changed',
+  'not-backed-up': 'not backed up',
+  locked: 'locked',
 }
 
 export function ProjectsScreen(): React.JSX.Element {
@@ -38,11 +47,12 @@ export function ProjectsScreen(): React.JSX.Element {
         }
         const withStatus = await Promise.all(
           rows.map(async (p) => {
-            const found = await listEnvFiles(p.folderPath).catch(() => ['.env'] as string[])
+            const found = trackableEnvFiles(
+              await listEnvFiles(p.folderPath).catch(() => ['.env'] as string[]),
+            )
             const names = found.length > 0 ? found : ['.env']
             const fileName = names.includes('.env') ? '.env' : (names[0] ?? '.env')
-            const sep = p.folderPath.includes('/') ? '/' : '\\'
-            const filePath = `${p.folderPath.replace(/[\\/]+$/, '')}${sep}${fileName}`
+            const filePath = joinPath(p.folderPath, fileName)
             try {
               const status = await projectStatus(ctx, {
                 projectId: p.id,
@@ -105,6 +115,12 @@ export function ProjectsScreen(): React.JSX.Element {
           Projects
         </h1>
         <Link
+          to="/add?tab=scan"
+          className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md border px-4 py-2 text-sm font-medium transition-colors hover:bg-accent"
+        >
+          Scan folder
+        </Link>
+        <Link
           to="/add"
           className="inline-flex min-h-[44px] items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90"
         >
@@ -123,9 +139,9 @@ export function ProjectsScreen(): React.JSX.Element {
           <CardHeader>
             <CardTitle>Welcome — local-first, no lock-in</CardTitle>
             <CardDescription>
-              This app is a sidecar: your <code>.env</code> files stay the source of truth, nothing
-              is added to your repos, and no account is needed. Add a folder and edit values in
-              place — encrypted backups stay on this device.
+              Your <code>.env</code> files stay the source of truth and nothing is added to your
+              repos. This app keeps encrypted backups in a local vault — no account, no server,
+              export anytime.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -148,8 +164,8 @@ export function ProjectsScreen(): React.JSX.Element {
           <CardHeader>
             <CardTitle>No projects yet</CardTitle>
             <CardDescription>
-              Add a project folder to get started. Nothing is written into your repos —{' '}
-              <code>.env</code> stays the source of truth.
+              Add one folder or scan a parent folder to find repos and monorepo subfolders. Nothing
+              is written into your repos — <code>.env</code> stays the source of truth.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap items-center gap-2">
@@ -163,12 +179,13 @@ export function ProjectsScreen(): React.JSX.Element {
           <li key={p.id}>
             <Link
               to={`/project/${encodeURIComponent(p.id)}`}
+              title={p.folderPath}
               className="block min-h-[44px] rounded-[var(--radius)] border bg-card p-4 text-card-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
             >
               <span className="flex flex-wrap items-center gap-2">
                 <span className="mr-auto min-w-0 truncate font-medium">{p.displayName}</span>
                 <Badge variant={statusVariant[statuses[p.id] ?? 'not-backed-up']}>
-                  {statuses[p.id] ?? '…'}
+                  {statusLabel[statuses[p.id] ?? 'not-backed-up']}
                 </Badge>
               </span>
               <span className="mt-1 block min-w-0 truncate text-sm text-muted-foreground">

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
 import { isUnlocked } from '@/lib/crypto'
 import { detectIdentity, normalizeGitRemote, type ProjectIdentity } from '@/lib/identity'
+import { folderKey, joinPath } from '@/lib/paths'
 import { DEFAULT_SKIP_DIRS, buildScanCandidates, type ScanCandidate } from '@/lib/scan'
 import { createTauriStore } from '@/lib/store'
 import { backupToVault, type SyncContext } from '@/lib/sync'
@@ -25,13 +26,8 @@ import {
   type ScanProgress,
 } from '@/lib/tauri'
 import { cn } from '@/lib/utils'
-import { Vault, createMemoryDriver, createTauriDriver } from '@/lib/vault'
+import { Vault, createMemoryDriver, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import * as React from 'react'
-
-function joinPath(folder: string, file: string): string {
-  const sep = folder.includes('/') ? '/' : '\\'
-  return `${folder.replace(/[\\/]+$/, '')}${sep}${file}`
-}
 
 function isDuplicate(candidate: ScanCandidate): boolean {
   return candidate.duplicateOf !== undefined || candidate.duplicateInScan === true
@@ -47,6 +43,7 @@ export function AddProjectScreen(): React.JSX.Element {
   const [folder, setFolder] = useState<string>('')
   const [remote, setRemote] = useState<string>('')
   const [result, setResult] = useState<ProjectIdentity | null>(null)
+  const [existingMatch, setExistingMatch] = useState<ProjectRecord | null>(null)
   const [error, setError] = useState<string>('')
   const [saving, setSaving] = useState(false)
 
@@ -87,6 +84,7 @@ export function AddProjectScreen(): React.JSX.Element {
 
   async function handlePick(): Promise<void> {
     setError('')
+    setExistingMatch(null)
     try {
       const picked = await pickProjectFolder()
       if (picked) {
@@ -104,6 +102,7 @@ export function AddProjectScreen(): React.JSX.Element {
 
   function handleDetect(): void {
     setError('')
+    setExistingMatch(null)
     try {
       const id = detectIdentity({ folderPath: folder, gitRemoteUrl: remote || undefined })
       setResult(id)
@@ -124,6 +123,16 @@ export function AddProjectScreen(): React.JSX.Element {
           ? (result.identity.split('/').pop() ?? folder)
           : folder.split(/[\\/]/).pop() || folder
       const vault = new Vault(isTauri() ? createTauriDriver() : createMemoryDriver())
+      const existing = await vault.listProjects()
+      const match =
+        existing.find((p) => p.identity === identity) ??
+        existing.find((p) => folderKey(p.folderPath) === folderKey(folder)) ??
+        null
+      if (match !== null) {
+        setExistingMatch(match)
+        setError('This project is already in your vault.')
+        return
+      }
       const row = await vault.addProject({ identity, displayName, folderPath: folder })
       if (isTauri()) {
         // Folder → identity mapping lives in ~/.env-manager/links.json,
@@ -315,7 +324,11 @@ export function AddProjectScreen(): React.JSX.Element {
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
                 value={folder}
-                onChange={(e) => setFolder(e.target.value)}
+                onChange={(e) => {
+                  setFolder(e.target.value)
+                  setResult(null)
+                  setExistingMatch(null)
+                }}
                 placeholder="/path/to/your/project"
                 aria-label="Project folder"
                 className="min-w-0 flex-1"
@@ -326,7 +339,11 @@ export function AddProjectScreen(): React.JSX.Element {
             </div>
             <Input
               value={remote}
-              onChange={(e) => setRemote(e.target.value)}
+              onChange={(e) => {
+                setRemote(e.target.value)
+                setResult(null)
+                setExistingMatch(null)
+              }}
               placeholder="git remote origin (optional — auto-detected in the desktop app)"
               aria-label="Git remote origin"
             />
@@ -341,6 +358,18 @@ export function AddProjectScreen(): React.JSX.Element {
             {error !== '' && (
               <p role="alert" className="text-sm text-destructive">
                 {error}
+              </p>
+            )}
+            {existingMatch !== null && (
+              <p className="text-sm">
+                Open{' '}
+                <Link
+                  to={`/project/${encodeURIComponent(existingMatch.id)}`}
+                  className="font-medium underline underline-offset-4"
+                >
+                  {existingMatch.folderPath}
+                </Link>{' '}
+                instead.
               </p>
             )}
             {result !== null && (

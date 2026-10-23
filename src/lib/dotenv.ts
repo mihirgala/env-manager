@@ -2,7 +2,7 @@
  * Lossless dotenv model — pure TS, no Tauri imports.
  *
  * The parser preserves comments, order, quoting, blank lines and `export`
- * prefixes. Only values change on pull; key add/remove is explicit.
+ * prefixes. Only values change on save; key add/remove is explicit.
  * Round-trip invariant: `serialize(parse(fixture)) === fixture`.
  */
 

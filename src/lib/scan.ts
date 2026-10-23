@@ -12,6 +12,7 @@ import {
   normalizeSubpath,
   withSubpath,
 } from './identity'
+import { folderKey } from './paths'
 import type { ScanRow } from './tauri'
 import type { ProjectRecord } from './vault'
 
@@ -54,10 +55,6 @@ export interface ScanCandidate {
 function baseName(path: string): string {
   const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/)
   return parts.at(-1) ?? path
-}
-
-function folderKey(path: string): string {
-  return path.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
 function displayFor(repoName: string, subpath: string): string {

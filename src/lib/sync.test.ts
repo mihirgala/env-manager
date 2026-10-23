@@ -65,7 +65,7 @@ describe('snapshot engine (memory store + memory fs)', () => {
   it('changed file → planRestore diff → applyRestore backs up before writing', async () => {
     await setupPassphrase('sync-passphrase-2')
     const store = createMemoryStore()
-    const files = new Map([['/p/.env', 'K=cloud\n']])
+    const files = new Map([['/p/.env', 'K=stored\n']])
     const io = memoryIO(files)
     const ctx: SyncContext = { store, io }
 
@@ -84,7 +84,7 @@ describe('snapshot engine (memory store + memory fs)', () => {
     const applied = await applyRestore(ctx, target)
     expect(applied.backupPath).not.toBeNull()
     expect(await io.readFile(applied.backupPath as string)).toBe('K=local-edit\n')
-    expect(await io.readFile('/p/.env')).toBe('K=cloud\n')
+    expect(await io.readFile('/p/.env')).toBe('K=stored\n')
     expect(await projectStatus(ctx, target)).toBe('backed-up')
     // The restore itself records a fresh local snapshot.
     expect(store.rows).toHaveLength(2)

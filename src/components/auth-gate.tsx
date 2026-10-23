@@ -6,8 +6,8 @@ import { UnlockScreen } from '@/screens/unlock'
 
 /**
  * Boot gate: when encryption is set up (salt in config) but the master key
- * isn't in memory, force the Unlock screen. Local-only users who never set
- * a passphrase pass straight through.
+ * isn't in memory, force the Unlock screen. Users who never set a
+ * passphrase pass straight through.
  */
 export function AuthGate({ children }: { children: React.ReactNode }): React.JSX.Element {
   const [state, setState] = React.useState<'checking' | 'open' | 'locked'>('checking')

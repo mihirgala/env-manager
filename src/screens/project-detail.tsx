@@ -1,22 +1,74 @@
 import { Check, Copy, Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
 import * as React from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
+import {
+  buildBundle,
+  decryptBundle,
+  parseBundle,
+  serializeBundle,
+  type Bundle,
+} from '@/lib/bundle'
 import { isUnlocked } from '@/lib/crypto'
 import { effectiveValue, getValue, parse, serialize, setValue, type DotenvDocument } from '@/lib/dotenv'
+import { isTrackableEnvFile, trackableEnvFiles } from '@/lib/env-files'
+import { joinPath } from '@/lib/paths'
 import { createTauriStore } from '@/lib/store'
-import { backupToVault, type SyncContext } from '@/lib/sync'
-import { isTauri, backupEnvFile, fileStat, listEnvFiles, readEnvFile, writeEnvFile } from '@/lib/tauri'
+import {
+  applyImportedText,
+  applyRestore,
+  backupToVault,
+  fileNameOf,
+  planRestore,
+  previewDiff,
+  projectStatus,
+  type DiffPreview,
+  type FileTarget,
+  type RestorePlan,
+  type SyncContext,
+  type VaultStatus,
+} from '@/lib/sync'
+import {
+  backupEnvFile,
+  fileStat,
+  isTauri,
+  listEnvFiles,
+  pickOpenFile,
+  pickSaveFile,
+  readEnvFile,
+  writeEnvFile,
+  type DialogFilter,
+} from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import { cn } from '@/lib/utils'
 
-function joinPath(folder: string, file: string): string {
-  const sep = folder.includes('/') ? '/' : '\\'
-  return `${folder.replace(/[\\/]+$/, '')}${sep}${file}`
+const BUNDLE_FILTERS: DialogFilter[] = [{ name: 'env-manager bundle', extensions: ['envmgr'] }]
+
+const statusVariant: Record<VaultStatus, 'success' | 'warning' | 'outline'> = {
+  'backed-up': 'success',
+  changed: 'warning',
+  'not-backed-up': 'outline',
+  locked: 'outline',
+}
+
+const statusLabel: Record<VaultStatus, string> = {
+  'backed-up': 'backed up',
+  changed: 'changed',
+  'not-backed-up': 'not backed up',
+  locked: 'locked',
+}
+
+function cleanDiff(diff: DiffPreview): boolean {
+  return diff.added.length === 0 && diff.removed.length === 0 && diff.changed.length === 0
+}
+
+function safeFileName(name: string): string {
+  const safe = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim()
+  return safe === '' ? 'project' : safe
 }
 
 async function copyText(text: string): Promise<boolean> {
@@ -28,9 +80,65 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
+function DiffSummary({ diff }: { diff: DiffPreview }): React.JSX.Element {
+  if (cleanDiff(diff)) {
+    return (
+      <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+        No key changes.
+      </p>
+    )
+  }
+  return (
+    <div className="rounded-md border bg-muted/40 p-3 text-sm">
+      <ul className="flex flex-col gap-1">
+        {diff.added.map((key) => (
+          <li key={`added-${key}`} className="break-words">
+            <span className="font-medium text-emerald-700 dark:text-emerald-400">+</span>{' '}
+            <code>{key}</code> <span className="text-muted-foreground">added</span>
+          </li>
+        ))}
+        {diff.changed.map((key) => (
+          <li key={`changed-${key}`} className="break-words">
+            <span className="font-medium text-amber-700 dark:text-amber-400">~</span>{' '}
+            <code>{key}</code> <span className="text-muted-foreground">changed</span>
+          </li>
+        ))}
+        {diff.removed.map((key) => (
+          <li key={`removed-${key}`} className="break-words">
+            <span className="font-medium text-destructive">-</span> <code>{key}</code>{' '}
+            <span className="text-muted-foreground">removed</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+interface ImportPreviewState {
+  source: 'bundle' | 'plaintext'
+  label: string
+  files: Record<string, string>
+  diffs: Record<string, DiffPreview>
+}
+
+interface PendingBundle {
+  bundle: Bundle
+  path: string
+}
+
+function targetFor(project: ProjectRecord, fileName: string): FileTarget {
+  return {
+    projectId: project.id,
+    identity: project.identity,
+    filePath: joinPath(project.folderPath, fileName),
+    fileName,
+  }
+}
+
 export function ProjectDetailScreen(): React.JSX.Element {
   const { id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const toast = useToast()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
   const sync = React.useMemo<SyncContext>(
@@ -53,6 +161,18 @@ export function ProjectDetailScreen(): React.JSX.Element {
   const [newValue, setNewValue] = React.useState('')
   const [error, setError] = React.useState('')
   const [saving, setSaving] = React.useState(false)
+  const [actionBusy, setActionBusy] = React.useState(false)
+  const [status, setStatus] = React.useState<VaultStatus>('locked')
+  const [restorePlan, setRestorePlan] = React.useState<RestorePlan | null>(null)
+  const [importPreview, setImportPreview] = React.useState<ImportPreviewState | null>(null)
+  const [importSelected, setImportSelected] = React.useState<Set<string>>(new Set())
+  const [pendingBundle, setPendingBundle] = React.useState<PendingBundle | null>(null)
+  const [bundlePassphrase, setBundlePassphrase] = React.useState('')
+  const [bundleError, setBundleError] = React.useState('')
+  const [bundleNeedsPassphrase, setBundleNeedsPassphrase] = React.useState(false)
+  const autoImportRef = React.useRef<string | null>(null)
+
+  const unlocked = isUnlocked()
 
   const loadFile = React.useCallback(
     async (p: ProjectRecord, fileName: string) => {
@@ -79,7 +199,8 @@ export function ProjectDetailScreen(): React.JSX.Element {
         setProject(p)
         const found = await listEnvFiles(p.folderPath).catch(() => ['.env'] as string[])
         if (cancelled) return
-        const list = found.length > 0 ? found : ['.env']
+        const trackable = trackableEnvFiles(found)
+        const list = trackable.length > 0 ? trackable : ['.env']
         setFiles(list)
         setFile(list[0] ?? '.env')
         await loadFile(p, list[0] ?? '.env').catch((err: unknown) => {
@@ -99,6 +220,20 @@ export function ProjectDetailScreen(): React.JSX.Element {
       cancelled = true
     }
   }, [id, vault, loadFile])
+
+  // Vault status for the selected file.
+  React.useEffect(() => {
+    if (project === null) return
+    let cancelled = false
+    projectStatus(sync, targetFor(project, file))
+      .then((next) => {
+        if (!cancelled) setStatus(next)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [project, file, sync, unlocked])
 
   // Watcher poll: compare mtime/size; flag when the file changed outside the app.
   React.useEffect(() => {
@@ -127,6 +262,32 @@ export function ProjectDetailScreen(): React.JSX.Element {
     }
   }, [project, file, diskText])
 
+  // Escape closes whichever preview card is open.
+  React.useEffect(() => {
+    if (restorePlan === null && importPreview === null && pendingBundle === null) return
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setRestorePlan(null)
+        setImportPreview(null)
+        setImportSelected(new Set())
+        setPendingBundle(null)
+        setBundleError('')
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [restorePlan, importPreview, pendingBundle])
+
+  // A settings-level bundle import routes here with the chosen path.
+  React.useEffect(() => {
+    const state = location.state as { bundlePath?: string } | null
+    const bundlePath = state?.bundlePath
+    if (project === null || bundlePath === undefined || autoImportRef.current === bundlePath) return
+    autoImportRef.current = bundlePath
+    navigate(location.pathname, { replace: true, state: null })
+    void handleImportBundle(bundlePath)
+  }, [project, location.state, location.pathname, navigate])
+
   if (!isTauri()) {
     return (
       <div className="flex flex-col gap-4">
@@ -148,6 +309,15 @@ export function ProjectDetailScreen(): React.JSX.Element {
   const dirty = doc !== null && currentText !== savedText
   const pairs = doc !== null ? doc.entries.filter((e) => e.type === 'pair') : []
 
+  async function refreshStatus(): Promise<void> {
+    if (project === null) return
+    try {
+      setStatus(await projectStatus(sync, targetFor(project, file)))
+    } catch {
+      // Keep the last known status; the action itself already surfaced errors.
+    }
+  }
+
   async function handleSave(): Promise<void> {
     if (project === null || doc === null) return
     setSaving(true)
@@ -161,18 +331,16 @@ export function ProjectDetailScreen(): React.JSX.Element {
       setChangedOnDisk(false)
       // Never block the disk write on crypto: save first, then back up.
       if (!isUnlocked()) {
+        setStatus('locked')
         toast('Saved — unlock to back up.')
         return
       }
       try {
-        await backupToVault(sync, {
-          projectId: project.id,
-          identity: project.identity,
-          filePath: path,
-          fileName: file,
-        })
+        await backupToVault(sync, targetFor(project, file))
+        setStatus('backed-up')
         toast('Saved and backed up.')
       } catch (err) {
+        await refreshStatus()
         toast(`Saved — backup failed: ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
       }
     } catch (err) {
@@ -186,6 +354,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
     if (project === null) return
     try {
       await loadFile(project, file)
+      await refreshStatus()
       toast('Reloaded from disk.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Reload failed')
@@ -194,12 +363,257 @@ export function ProjectDetailScreen(): React.JSX.Element {
 
   async function handleBackup(): Promise<void> {
     if (project === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption to back up to the vault.', 'error')
+      return
+    }
+    setActionBusy(true)
     try {
-      const backup = await backupEnvFile(joinPath(project.folderPath, file))
-      toast(`Backup written: ${backup}`)
+      await backupToVault(sync, targetFor(project, file))
+      setStatus('backed-up')
+      toast('Encrypted snapshot saved to the vault.')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Backup failed', 'error')
+    } finally {
+      setActionBusy(false)
     }
+  }
+
+  async function handlePlanRestore(): Promise<void> {
+    if (project === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption to restore from the vault.', 'error')
+      return
+    }
+    setActionBusy(true)
+    setImportPreview(null)
+    setPendingBundle(null)
+    try {
+      const plan = await planRestore(sync, targetFor(project, file))
+      if (plan === null) {
+        toast('No encrypted snapshot for this file yet — back it up first.', 'error')
+        return
+      }
+      setRestorePlan(plan)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Could not read snapshot', 'error')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleApplyRestore(): Promise<void> {
+    if (project === null || restorePlan === null) return
+    setActionBusy(true)
+    try {
+      const applied = await applyRestore(sync, targetFor(project, file))
+      await loadFile(project, file)
+      setRestorePlan(null)
+      setStatus('backed-up')
+      toast(
+        applied.backupPath !== null
+          ? `Restored from the vault. Previous file saved as ${applied.backupPath}.`
+          : 'Restored from the vault.',
+      )
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Restore failed', 'error')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleExportBundle(): Promise<void> {
+    if (project === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption to export an encrypted bundle.', 'error')
+      return
+    }
+    setActionBusy(true)
+    try {
+      const names = trackableEnvFiles(files)
+      if (names.length === 0) throw new Error('No trackable .env files to export.')
+      const path = await pickSaveFile(`${safeFileName(project.displayName)}.envmgr`, BUNDLE_FILTERS)
+      if (path === null) return
+      const contents: Record<string, string> = {}
+      for (const name of names) {
+        contents[name] = await readEnvFile(joinPath(project.folderPath, name))
+      }
+      const bundle = await buildBundle({
+        identity: project.identity,
+        displayName: project.displayName,
+        files: contents,
+      })
+      await writeEnvFile(path, serializeBundle(bundle))
+      toast('Encrypted bundle exported. Keep the passphrase that protects it.')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Bundle export failed', 'error')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleExportPlaintext(): Promise<void> {
+    if (project === null) return
+    try {
+      const path = await pickSaveFile(
+        `${safeFileName(project.displayName)}.${file}.plaintext.env`,
+        [{ name: 'Plaintext env file', extensions: ['env', 'txt'] }],
+      )
+      if (path === null) return
+      await writeEnvFile(path, currentText)
+      toast('Plaintext export written — this file is NOT encrypted.')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Plaintext export failed', 'error')
+    }
+  }
+
+  async function openImportPreview(input: {
+    source: 'bundle' | 'plaintext'
+    label: string
+    files: Record<string, string>
+  }): Promise<void> {
+    if (project === null) return
+    const diffs: Record<string, DiffPreview> = {}
+    const selected = new Set<string>()
+    for (const [fileName, text] of Object.entries(input.files)) {
+      const local = await readEnvFile(joinPath(project.folderPath, fileName)).catch(() => '')
+      const diff = previewDiff(local, text)
+      diffs[fileName] = diff
+      if (!cleanDiff(diff)) selected.add(fileName)
+    }
+    setRestorePlan(null)
+    setPendingBundle(null)
+    setBundlePassphrase('')
+    setBundleError('')
+    setBundleNeedsPassphrase(false)
+    setImportPreview({ ...input, diffs })
+    setImportSelected(selected)
+  }
+
+  async function handleImportBundle(explicitPath?: string): Promise<void> {
+    if (project === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption to import an encrypted bundle.', 'error')
+      return
+    }
+    setActionBusy(true)
+    setError('')
+    setRestorePlan(null)
+    setBundleError('')
+    try {
+      const path = explicitPath ?? (await pickOpenFile(BUNDLE_FILTERS))
+      if (path === null) return
+      const bundle = parseBundle(await readEnvFile(path))
+      if (bundle.project.identity !== project.identity) {
+        throw new Error(
+          `This bundle is for ${bundle.project.identity}, not ${project.identity}. Open that project (or add it) first.`,
+        )
+      }
+      setPendingBundle({ bundle, path })
+      try {
+        const files = await decryptBundle(bundle)
+        await openImportPreview({ source: 'bundle', label: bundle.project.displayName, files })
+      } catch (err) {
+        setBundleNeedsPassphrase(true)
+        setBundleError(err instanceof Error ? err.message : 'Could not decrypt the bundle')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Bundle import failed')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleDecryptPendingBundle(): Promise<void> {
+    if (pendingBundle === null) return
+    setActionBusy(true)
+    setBundleError('')
+    try {
+      const files = await decryptBundle(pendingBundle.bundle, { passphrase: bundlePassphrase })
+      await openImportPreview({
+        source: 'bundle',
+        label: pendingBundle.bundle.project.displayName,
+        files,
+      })
+    } catch (err) {
+      setBundleNeedsPassphrase(true)
+      setBundleError(err instanceof Error ? err.message : 'Wrong passphrase or corrupted bundle')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleImportPlaintext(): Promise<void> {
+    if (project === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption to import a plaintext file.', 'error')
+      return
+    }
+    setActionBusy(true)
+    setError('')
+    setRestorePlan(null)
+    try {
+      const path = await pickOpenFile([])
+      if (path === null) return
+      const fileName = fileNameOf(path)
+      if (!isTrackableEnvFile(fileName)) {
+        throw new Error('Only .env files can be imported (templates and backups are ignored).')
+      }
+      const text = await readEnvFile(path)
+      await openImportPreview({ source: 'plaintext', label: fileName, files: { [fileName]: text } })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Plaintext import failed')
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleApplyImport(): Promise<void> {
+    if (project === null || importPreview === null) return
+    const names = [...importSelected].filter((name) => importPreview.files[name] !== undefined)
+    if (names.length === 0) return
+    if (dirty && !window.confirm('Importing reloads the current file and discards unsaved edits. Continue?')) {
+      return
+    }
+    setActionBusy(true)
+    const failed: string[] = []
+    let applied = 0
+    for (const fileName of names) {
+      const text = importPreview.files[fileName]
+      if (text === undefined) continue
+      try {
+        await applyImportedText(sync, { ...targetFor(project, fileName), text })
+        applied += 1
+      } catch {
+        failed.push(fileName)
+      }
+    }
+    try {
+      const found = trackableEnvFiles(await listEnvFiles(project.folderPath))
+      const nextFiles = found.length > 0 ? found : files
+      const view = nextFiles.includes(names[0] ?? '') ? (names[0] as string) : (nextFiles[0] ?? file)
+      setFiles(nextFiles)
+      setFile(view)
+      await loadFile(project, view)
+      setStatus(await projectStatus(sync, targetFor(project, view)))
+    } catch {
+      // The files that were written are still valid; keep the editor usable.
+    }
+    setImportPreview(null)
+    setImportSelected(new Set())
+    setActionBusy(false)
+    const prefix = applied > 0 ? `Applied ${applied} file${applied === 1 ? '' : 's'}` : 'No files applied'
+    toast(
+      failed.length > 0 ? `${prefix} · ${failed.length} failed` : `${prefix} — originals backed up.`,
+      failed.length > 0 ? 'error' : 'info',
+    )
+  }
+
+  function cancelBundle(): void {
+    setPendingBundle(null)
+    setBundleError('')
+    setBundlePassphrase('')
+    setBundleNeedsPassphrase(false)
   }
 
   async function handleRemove(): Promise<void> {
@@ -214,16 +628,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
     }
   }
 
-  function downloadExport(): void {
-    const blob = new Blob([currentText], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `${project?.displayName ?? 'project'}.${file}.export`
-    a.click()
-    URL.revokeObjectURL(url)
-    toast('Export downloaded.')
-  }
+  const cryptoDisabled = !unlocked || actionBusy
 
   return (
     <div className="flex flex-col gap-4">
@@ -231,12 +636,13 @@ export function ProjectDetailScreen(): React.JSX.Element {
         <h1 className="mr-auto min-w-0 truncate text-[clamp(1.25rem,2vw+1rem,1.75rem)] font-semibold tracking-tight">
           {project?.displayName ?? 'Project'}
         </h1>
+        <Badge variant={statusVariant[status]}>{statusLabel[status]}</Badge>
         {dirty && <Badge variant="warning">unsaved changes</Badge>}
         {changedOnDisk && <Badge variant="destructive">changed on disk</Badge>}
       </div>
 
       {project !== null && (
-        <p className="min-w-0 truncate text-sm text-muted-foreground">
+        <p className="min-w-0 truncate text-sm text-muted-foreground" title={project.folderPath}>
           <code>{project.identity}</code> · {project.folderPath}
         </p>
       )}
@@ -244,6 +650,13 @@ export function ProjectDetailScreen(): React.JSX.Element {
       {error !== '' && (
         <p role="alert" className="text-sm text-destructive">
           {error}
+        </p>
+      )}
+
+      {!unlocked && (
+        <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
+          Locked — editing and saving still work. Unlock encryption to back up, restore, or
+          import/export encrypted bundles.
         </p>
       )}
 
@@ -285,6 +698,149 @@ export function ProjectDetailScreen(): React.JSX.Element {
             </button>
           ))}
         </div>
+      )}
+
+      {restorePlan !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Restore the latest snapshot?</CardTitle>
+            <CardDescription>
+              Snapshot from {new Date(restorePlan.snapshotAt).toLocaleString()} · source{' '}
+              {restorePlan.source}
+              {restorePlan.conflict ? ' · local edits differ from the snapshot' : ''}. The current
+              file is backed up to <code>.env.backup-&lt;ts&gt;</code> before anything is written.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <DiffSummary diff={restorePlan.diff} />
+            <div className="flex flex-wrap gap-2">
+              <Button type="button" onClick={handleApplyRestore} disabled={actionBusy}>
+                {actionBusy ? 'Applying…' : 'Backup + apply'}
+              </Button>
+              <Button type="button" variant="outline" onClick={() => setRestorePlan(null)}>
+                Cancel
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {pendingBundle !== null && importPreview === null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Bundle passphrase</CardTitle>
+            <CardDescription>
+              This bundle was encrypted with another passphrase. It is decrypted in memory only;
+              nothing is written until you confirm the diff.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            {bundleNeedsPassphrase && (
+              <Input
+                type="password"
+                autoComplete="off"
+                aria-label="Bundle passphrase"
+                placeholder="Passphrase for this bundle"
+                value={bundlePassphrase}
+                onChange={(e) => setBundlePassphrase(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && bundlePassphrase !== '') void handleDecryptPendingBundle()
+                }}
+              />
+            )}
+            {bundleError !== '' && (
+              <p role="alert" className="text-sm text-destructive">
+                {bundleError}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={handleDecryptPendingBundle}
+                disabled={!bundleNeedsPassphrase || bundlePassphrase === '' || actionBusy}
+              >
+                {actionBusy ? 'Decrypting…' : 'Decrypt bundle'}
+              </Button>
+              <Button type="button" variant="outline" onClick={cancelBundle}>
+                Cancel
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {importPreview !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Import {importPreview.label}</CardTitle>
+            <CardDescription>
+              {importPreview.source === 'bundle'
+                ? 'Decrypted in memory. Selected files are backed up to .env.backup-<ts> before writing and recorded as an import snapshot.'
+                : 'Plaintext file. The target is backed up before writing and recorded as an import snapshot.'}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <ul className="flex flex-col gap-2">
+              {Object.keys(importPreview.files)
+                .sort()
+                .map((fileName) => {
+                  const diff = importPreview.diffs[fileName] ?? { added: [], removed: [], changed: [] }
+                  const clean = cleanDiff(diff)
+                  return (
+                    <li key={fileName} className="rounded-md border p-3">
+                      <label className="flex min-h-[44px] items-center gap-2 text-sm font-medium">
+                        <input
+                          type="checkbox"
+                          className="h-5 w-5"
+                          checked={importSelected.has(fileName)}
+                          disabled={clean || actionBusy}
+                          onChange={() =>
+                            setImportSelected((previous) => {
+                              const next = new Set(previous)
+                              if (next.has(fileName)) next.delete(fileName)
+                              else next.add(fileName)
+                              return next
+                            })
+                          }
+                        />
+                        <code className="min-w-0 break-words">{fileName}</code>
+                        {clean && <Badge variant="outline">no changes</Badge>}
+                      </label>
+                      <div className="mt-2">
+                        <DiffSummary diff={diff} />
+                      </div>
+                    </li>
+                  )
+                })}
+            </ul>
+            {dirty && (
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                The current editor has unsaved edits. Applying the import reloads from disk.
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={handleApplyImport}
+                disabled={actionBusy || importSelected.size === 0}
+              >
+                {actionBusy
+                  ? 'Applying…'
+                  : `Backup + apply ${importSelected.size} file${importSelected.size === 1 ? '' : 's'}`}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setImportPreview(null)
+                  setImportSelected(new Set())
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       <Card>
@@ -387,16 +943,34 @@ export function ProjectDetailScreen(): React.JSX.Element {
       </Card>
 
       <div className="flex flex-wrap gap-2">
-        <Button type="button" onClick={handleSave} disabled={!dirty || saving}>
+        <Button type="button" onClick={handleSave} disabled={!dirty || saving || actionBusy}>
           <Check aria-hidden /> {saving ? 'Saving…' : 'Save'}
         </Button>
-        <Button type="button" variant="outline" onClick={handleBackup}>
-          Backup now
+        <Button type="button" variant="outline" onClick={handleBackup} disabled={cryptoDisabled}>
+          Back up now
         </Button>
-        <Button type="button" variant="outline" onClick={downloadExport}>
-          Export
+        <Button type="button" variant="outline" onClick={handlePlanRestore} disabled={cryptoDisabled}>
+          Restore…
         </Button>
-        <Button type="button" variant="destructive" onClick={handleRemove}>
+        <Button type="button" variant="secondary" onClick={handleExportBundle} disabled={cryptoDisabled}>
+          Export bundle…
+        </Button>
+        <Button type="button" variant="secondary" onClick={() => void handleImportBundle()} disabled={cryptoDisabled}>
+          Import bundle…
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={handleExportPlaintext}
+          disabled={actionBusy}
+          className="border-amber-500/60 text-amber-700 dark:text-amber-400"
+        >
+          Export plaintext…
+        </Button>
+        <Button type="button" variant="outline" onClick={handleImportPlaintext} disabled={cryptoDisabled}>
+          Import plaintext…
+        </Button>
+        <Button type="button" variant="destructive" onClick={handleRemove} className="sm:ml-auto">
           <Trash2 aria-hidden /> Unlink
         </Button>
       </div>
