@@ -105,19 +105,21 @@ Attach `SHA256SUMS.txt` to the release and paste the hashes into the release not
 - macOS builds `--target universal-apple-darwin`; both Rust targets are installed first.
 - Linux installs WebKitGTK + AppIndicator deps before building.
 - No signing configuration in 0.1.0. Leave signing env vars unset so Tauri produces unsigned
-  artifacts.
+  artifacts. Do not map empty secrets into the build step: Tauri treats an empty
+  `APPLE_CERTIFICATE` as present and tries to import a keychain certificate.
 
 ### Signing variables (future, CI secrets only)
 
 Do not add certificates, private keys, or passwords to the repo. When signing is enabled, inject
 these through CI secrets and document which are enabled in the release notes:
 
-- macOS: the workflow already maps `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
-  `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+- macOS: add `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
+  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` only on a signing-enabled run. Do not pass
+  empty values: Tauri treats the variable as set and tries to import an empty certificate.
 - Windows Authenticode: add a certificate-import step and a `certificateThumbprint` or
   `signCommand` in the bundle config. Keep the PFX and password in CI secrets.
-- Tauri updater (post-0.1.0): the workflow maps `TAURI_SIGNING_PRIVATE_KEY` and
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; `createUpdaterArtifacts` is `false` for 0.1.0.
+- Tauri updater (post-0.1.0): add `TAURI_SIGNING_PRIVATE_KEY` and
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` when `createUpdaterArtifacts` is enabled.
 
 Never commit keystores, p12 files, provisioning profiles, or generated signatures.
 
