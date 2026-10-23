@@ -59,7 +59,7 @@ has no network calls, no accounts, and no server.
 - [x] Remove hosted backend, auth UI, and cloud-only dependencies
 - [x] Portable crypto (`identity:fileName` DEKs, envelope v2, file name as AAD)
 - [x] SQLite vault + append-only encrypted snapshots + retention
-- [x] Encrypted `.envmgr` bundle import/export + plaintext escape hatch
+- [x] Single-file encrypted `.db` vault import/export + plaintext escape hatch
 - [x] Parent-folder scan (read-only) + bulk add
 - [x] Vault-only screens: status, back up, restore diff, import/export
 - [x] System / Light / Dark theme with no-flash boot

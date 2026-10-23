@@ -51,9 +51,9 @@ export function isUnlocked(): boolean {
 }
 
 /**
- * Public Argon2id salt of the held session key (not a secret). Lets bundle
- * import pick the session key when the envelope salt matches, and fall back
- * to asking for the bundle's passphrase otherwise.
+ * Public Argon2id salt of the held session key (not a secret). Lets portable
+ * vault import pick the session key when the envelope salt matches, and fall
+ * back to asking for the file's passphrase otherwise.
  */
 export function currentSalt(): string | null {
   return masterSalt
@@ -192,9 +192,55 @@ export async function decryptFile(
 }
 
 /**
- * Bundle import: derive the bundle's master key from its own salt without
- * touching the local session key. Used when a bundle was created on another
- * machine with a different passphrase setup.
+ * Import a set of envelopes with one Argon2id derivation. Used by the single
+ * portable vault file so a large import does not pay the KDF cost per row.
+ */
+export interface EnvelopeItem {
+  identity: string
+  fileName: string
+  envelope: CryptoEnvelope
+}
+
+export async function decryptFilesWithPassphrase(
+  passphrase: string,
+  salt: string,
+  items: EnvelopeItem[],
+): Promise<string[]> {
+  await ensureReady()
+  if (salt === '') throw new Error('crypto: envelope is missing its KDF salt')
+  const master = await deriveMasterKey(passphrase, unb64(salt))
+  const out: string[] = []
+  try {
+    for (const item of items) {
+      checkEnvelope(item.envelope)
+      requireFileName(item.identity, item.fileName)
+      if (item.envelope.salt !== salt) throw new Error('crypto: mixed envelope salts')
+      const dek = fileDek(master, item.identity, item.fileName)
+      try {
+        const open = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+          null,
+          unb64(item.envelope.ciphertext),
+          item.fileName,
+          unb64(item.envelope.nonce),
+          dek,
+        )
+        out.push(new TextDecoder().decode(open))
+      } catch {
+        throw new Error('crypto: decrypt failed — wrong passphrase or corrupted envelope')
+      } finally {
+        sodium.memzero(dek)
+      }
+    }
+    return out
+  } finally {
+    sodium.memzero(master)
+  }
+}
+
+/**
+ * Vault import: derive the file's master key from its own salt without
+ * touching the local session key. Used when a portable file was created on
+ * another machine with a different passphrase setup.
  */
 export async function decryptFileWithPassphrase(
   passphrase: string,
@@ -202,27 +248,10 @@ export async function decryptFileWithPassphrase(
   fileName: string,
   env: CryptoEnvelope,
 ): Promise<string> {
-  await ensureReady()
-  checkEnvelope(env)
-  requireFileName(identity, fileName)
-  if (env.salt === '') throw new Error('crypto: envelope is missing its KDF salt')
-  const master = await deriveMasterKey(passphrase, unb64(env.salt))
-  const dek = fileDek(master, identity, fileName)
-  try {
-    const open = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
-      null,
-      unb64(env.ciphertext),
-      fileName,
-      unb64(env.nonce),
-      dek,
-    )
-    return new TextDecoder().decode(open)
-  } catch {
-    throw new Error('crypto: decrypt failed — wrong passphrase or corrupted envelope')
-  } finally {
-    sodium.memzero(master)
-    sodium.memzero(dek)
-  }
+  const [text] = await decryptFilesWithPassphrase(passphrase, env.salt, [
+    { identity, fileName, envelope: env },
+  ])
+  return text ?? ''
 }
 
 /** Generate a one-time 256-bit recovery code (`xxxx-xxxx-…`, show once). */

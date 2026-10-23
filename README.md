@@ -19,18 +19,18 @@ and no config committed to your repos.
 2. **Zero files added to your projects.** No `env-manager.json` in repos, no code changes, no SDK
    imports.
 3. **Uninstall-safe.** Removing the app leaves all `.env` files intact.
-4. **Export anytime.** Encrypted `.envmgr` bundles are yours to copy; plaintext export is an
+4. **Export anytime.** One encrypted `.db` vault file is yours to copy; plaintext export is an
    explicit escape hatch.
 5. **No network, no telemetry.** The shipping app makes no network calls and has no account system.
 
 ## How it works
 
 ```
-+-------------------+        +------------------------+        +------------------+
-|  Desktop GUI      |        |  Local vault           |        |  .envmgr bundle  |
-|  Tauri + Vite     | <----> |  ~/.env-manager/       | <----> |  ciphertext only |
-|  React + TS       |        |  SQLite + snapshots    |  move  |  (manual copy)   |
-+-------------------+        +------------------------+        +------------------+
++-------------------+        +------------------------+        +---------------------+
+|  Desktop GUI      |        |  Local vault           |        |  env-manager .db    |
+|  Tauri + Vite     | <----> |  ~/.env-manager/       | <----> |  all projects,      |
+|  React + TS       |        |  SQLite + snapshots    |  move  |  ciphertext only    |
++-------------------+        +------------------------+        +---------------------+
         | reads/writes plain .env files in place (comments + order preserved)
         v
   your projects (untouched repos)
@@ -41,13 +41,16 @@ and no config committed to your repos.
   a manual UUID link in `~/.env-manager/links.json` for non-git folders.
 - **Local vault:** `~/.env-manager/vault.db` holds project rows and append-only encrypted snapshots.
   `links.json` and `config.json` hold local metadata. Nothing is written into target repos.
-- **No server, no account.** Moving a project between machines happens through encrypted `.envmgr`
-  bundles you copy yourself.
+- **No server, no account.** Moving between machines happens through one encrypted `.db` vault file
+  you copy yourself. Import merges into the local vault; it never deletes local projects.
 - **Encryption (zero-knowledge):** passphrase → Argon2id → master key → portable per-file keys
   (`BLAKE2b(master, "identity:fileName")`) → XChaCha20-Poly1305 via libsodium. The passphrase is
   typed at launch, never persisted, and never leaves the device.
 - **Automatic backups:** saving writes the `.env` file first and then an encrypted snapshot. Restore
   and import always show a key-level diff and write `.env.backup-<ts>` before changing anything.
+- **First-run onboarding + bulk backup:** a short welcome flow sets the passphrase (with a show-once
+  recovery code) and then adds or scans projects. **Back up all** — on the Projects screen and in
+  Settings — snapshots every env file in every linked project and reports a summary.
 - **Parent-folder scan:** pick a folder, walk it read-only, review the
   `repo` / `repo::apps/web` candidates, then bulk-add them with optional backups. Scanning never
   reads env contents.
@@ -57,14 +60,14 @@ and no config committed to your repos.
 ## Status
 
 **v0.1.0 — distribution build.** The hosted-backend experiment was removed; this release is the
-local SQLite vault, manual encrypted bundles, parent-folder scan, dark mode, and cross-platform
-packaging. See [docs/ROADMAP.md](docs/ROADMAP.md) and
+local SQLite vault, one encrypted `.db` vault file, parent-folder scan, dark mode, and
+cross-platform packaging. See [docs/ROADMAP.md](docs/ROADMAP.md) and
 [docs/plan/env-manager-rework/](docs/plan/env-manager-rework/).
 
 - [x] Project list, add project, parent-folder scan
 - [x] Lossless editor, file tabs, on-disk change detection
 - [x] SQLite vault with encrypted snapshots + restore diff
-- [x] Encrypted bundle export/import + plaintext escape hatch
+- [x] Single-file encrypted vault export/import + plaintext escape hatch
 - [x] System / Light / Dark theme
 - [ ] Signed installers and auto-update (post-0.1.0)
 
@@ -102,7 +105,7 @@ pnpm tauri build  # installers for the host OS only
 
 ```
 src/               # Vite React UI
-src/lib/           # pure TS: identity, dotenv, crypto, vault, store, sync, bundle, scan,
+src/lib/           # pure TS: identity, dotenv, crypto, vault, store, sync, portable, scan,
                    # env-files, theme, paths, config
 src-tauri/         # thin Rust: fs, git remote, file stats, SQLite rows, dialogs, scan walk
 docs/              # architecture, roadmap, distribution
@@ -115,7 +118,7 @@ testable without Rust. `src/lib/tauri.ts` is the only module that imports Tauri 
 
 PRs and issues welcome. Please:
 
-1. Don't commit real `.env` files, `vault.db`, `*.envmgr`, or `*.backup-*`.
+1. Don't commit real `.env` files, `vault.db`, exported vault `.db` files, or `*.backup-*`.
 2. Use fixtures under `src/lib/__fixtures__/` with fake values only.
 3. Keep target-project repos untouched in tests — use fixtures or temp dirs.
 4. Run `pnpm test` and `pnpm build` before opening a PR, and check both themes at 360px.

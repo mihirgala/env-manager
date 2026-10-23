@@ -5,7 +5,7 @@ GUI-only, local-first env manager. Tauri v2 + Vite React + TypeScript. Open sour
 ## Stack
 
 - Frontend: Vite React + TypeScript in `src/`. Product logic lives in `src/lib/` — `identity`,
-  `dotenv`, `crypto`, `vault`, `store`, `sync`, `bundle`, `scan`, `env-files`, `theme`, `paths`,
+  `dotenv`, `crypto`, `vault`, `store`, `sync`, `portable`, `scan`, `env-files`, `theme`, `paths`,
   `config` — so it stays testable without Rust.
 - Backend: Tauri v2 Rust in `src-tauri/` — thin only: fs read/write, `git remote get-url`, file
   stats, opaque SQLite snapshot rows, dialogs, and the read-only parent-folder scan walk. No
@@ -33,8 +33,8 @@ Rust is optional for most frontend work. `dev`, `test`, and `build` work without
 ## Structure
 
 ```
-src/                  # Vite React UI + src/lib (identity, dotenv, crypto, vault, store, sync,
-                      # bundle, scan, env-files, theme, paths, config)
+src/                  # Vite React UI + src/lib/ (identity, dotenv, crypto, vault, store, sync,
+                      # portable, scan, env-files, theme, paths, config)
 src-tauri/            # thin Rust: fs, git remote, file stats, SQLite rows, dialogs, scan walk
 docs/                 # architecture, roadmap
 docs/DISTRIBUTION.md  # artifacts, unsigned install, signing, checksums
@@ -47,9 +47,9 @@ src/lib/__fixtures__/ # dotenv fixtures for tests — never real secrets
 
 1. **No lock-in, ever.** `.env` stays the source of truth on disk. The app is a sidecar. Never add
    files, deps, or code to target user projects. Never write `env-manager.json` into a repo.
-2. **Never commit secrets.** No real `.env` files, `vault.db`, `*.envmgr`, `*.backup-*`, tokens, or
-   passphrases. Use fixtures under `src/lib/__fixtures__/` only; no template env files. Tests must
-   use temp dirs / fixtures, never real user repos.
+2. **Never commit secrets.** No real `.env` files, `vault.db`, exported vault `.db` files,
+   `*.backup-*`, tokens, or passphrases. Use fixtures under `src/lib/__fixtures__/` only; no template
+   env files. Tests must use temp dirs / fixtures, never real user repos.
 3. **Lossless dotenv.** The parser in `src/lib` must preserve comments, order, quoting, blank lines,
    and `export` prefixes. Only values change on save. Round-trip tests are required.
 4. **Thin Rust.** All product logic is in TS. Rust does FS, `git remote get-url`, file stats,
@@ -57,17 +57,17 @@ src/lib/__fixtures__/ # dotenv fixtures for tests — never real secrets
    policy, or file-name filtering in Rust.
 5. **Zero-knowledge.** The passphrase, master key, DEKs, and plaintext never leave the device, are
    never logged, and are never stored. The vault stores `{ v, salt, nonce, algo, ciphertext }`
-   envelopes plus a local `plaintext_sha256` for conflict detection only. Bundles carry ciphertext
-   and no hashes.
-6. **No account, no server.** Sync is manual: encrypted `.envmgr` bundles the user moves by hand.
+   envelopes plus a local `plaintext_sha256` for conflict detection only. Portable vault files
+   carry ciphertext, project metadata, and the public salt — never hashes or plaintext.
+6. **No account, no server.** Sync is manual: one encrypted `.db` vault file the user moves by hand.
    There is no per-project opt-out. Uninstall / unlink / export must leave `.env` files intact.
 7. **Project identity.** Normalize `git remote origin` (`git@github.com:Foo/bar.git` and
    `https://github.com/foo/bar` → `github.com/foo/bar`). Monorepos use `identity::subpath`.
    Fallback: manual UUID link in `~/.env-manager/links.json`, never in the repo.
 8. **GUI-only.** No CLI. Flows are buttons/screens: Add Project (folder picker), Scan a parent
    folder (read-only, bulk add), status badges (`locked | not-backed-up | backed-up | changed`),
-   Back up now, Restore with diff, encrypted bundle export/import, plaintext escape hatch, and
-   Settings → Remove (keeps `.env`). No push/pull, no cloud account.
+   Back up now, Restore with diff, single-file encrypted vault export/import, plaintext escape
+   hatch, and Settings → Remove (keeps `.env`). No push/pull, no cloud account.
 9. **Responsive + dark parity.** All screens must follow
    `.opencode/skills/responsive-design/SKILL.md` — fluid layouts, 360px minimum, 44px targets, no
    fixed-px page widths. Both light and dark themes are required deliverables.
@@ -83,7 +83,7 @@ src/lib/__fixtures__/ # dotenv fixtures for tests — never real secrets
   new content.
 - Snapshots are append-only with per-file retention. Status is computed locally from the latest
   snapshot + the current file hash.
-- Commit scope: `pnpm build` and `pnpm test` green, no `.env` / `vault.db` / `*.envmgr` /
+- Commit scope: `pnpm build` and `pnpm test` green, no `.env` / `vault.db` / exported vault `.db` /
   `*.backup-*` / `src-tauri/target/` committed.
 
 ## Packaging

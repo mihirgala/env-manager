@@ -15,6 +15,7 @@ import {
   useSidebar,
 } from '@/components/ui/sidebar'
 import { isTauri } from '@/lib/tauri'
+import { cn } from '@/lib/utils'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 
 const mainNav = [
@@ -50,7 +51,10 @@ function Brand(): React.JSX.Element {
       onClick={closeDrawer}
       aria-label="env-manager home"
       title="env-manager"
-      className="flex min-h-[44px] min-w-0 items-center gap-2 rounded-lg px-2 transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+      className={cn(
+        'flex min-h-[44px] w-full min-w-0 items-center gap-2 rounded-lg transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
+        collapsed ? 'justify-center px-0' : 'px-2',
+      )}
     >
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
         <KeyRound aria-hidden size={18} />

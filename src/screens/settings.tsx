@@ -1,36 +1,46 @@
-import { Monitor, Moon, Sun } from 'lucide-react'
+import { Archive, Monitor, Moon, Sun } from 'lucide-react'
 import * as React from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link } from 'react-router-dom'
 import { useTheme } from '@/components/theme-provider'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
-import { buildBundle, parseBundle, serializeBundle, type Bundle } from '@/lib/bundle'
+import { backupAllProjects, describeBackupResult } from '@/lib/backup-all'
 import { trackableEnvFiles } from '@/lib/env-files'
-import { folderKey, joinPath } from '@/lib/paths'
+import { folderKey } from '@/lib/paths'
 import { createTauriStore } from '@/lib/store'
+import { backupToVault, type SyncContext } from '@/lib/sync'
 import {
+  backupEnvFile,
   isTauri,
   linksRead,
   linksWrite,
   listEnvFiles,
   pickOpenFile,
-  pickProjectFolder,
+  pickSaveFile,
   readEnvFile,
   writeEnvFile,
   type DialogFilter,
 } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import {
+  currentSalt,
   generateRecoveryKey,
   isUnlocked,
   lock,
   setupPassphrase,
 } from '@/lib/crypto'
 import { ensureDeviceName, loadConfig, saveConfig } from '@/lib/config'
+import {
+  exportVaultFile,
+  importPortableVault,
+  preparePortableImport,
+  readPortableVault,
+  type PortableVault,
+} from '@/lib/portable'
 
-const BUNDLE_FILTERS: DialogFilter[] = [{ name: 'env-manager bundle', extensions: ['envmgr'] }]
+const VAULT_FILTERS: DialogFilter[] = [{ name: 'env-manager vault', extensions: ['db'] }]
 
 const themeOptions = [
   { value: 'system', label: 'System', icon: Monitor },
@@ -44,14 +54,12 @@ interface VaultStats {
   lastBackup: string | null
 }
 
-interface PendingImport {
-  bundle: Bundle
+interface PendingVaultImport {
   path: string
-}
-
-function safeName(name: string): string {
-  const safe = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim()
-  return safe === '' ? 'project' : safe.slice(0, 80)
+  vault: PortableVault
+  needsPassphrase: boolean
+  passphrase: string
+  error: string
 }
 
 function formatBytes(bytes: number): string {
@@ -62,7 +70,6 @@ function formatBytes(bytes: number): string {
 
 export function SettingsScreen(): React.JSX.Element {
   const toast = useToast()
-  const navigate = useNavigate()
   const { preference, resolved, setPreference } = useTheme()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
   const store = React.useMemo(() => createTauriStore(), [])
@@ -76,7 +83,8 @@ export function SettingsScreen(): React.JSX.Element {
   const [stats, setStats] = React.useState<VaultStats | null>(null)
   const [statsError, setStatsError] = React.useState('')
   const [busy, setBusy] = React.useState(false)
-  const [pendingImport, setPendingImport] = React.useState<PendingImport | null>(null)
+  const [backingUp, setBackingUp] = React.useState(false)
+  const [pendingVault, setPendingVault] = React.useState<PendingVaultImport | null>(null)
   const [importError, setImportError] = React.useState('')
 
   const computeStats = React.useCallback(
@@ -191,57 +199,54 @@ export function SettingsScreen(): React.JSX.Element {
     return rows
   }
 
-  async function exportAllBundles(): Promise<void> {
+  async function backUpAll(): Promise<void> {
     if (!isUnlocked()) {
-      toast('Unlock encryption to export encrypted bundles.', 'error')
+      toast('Unlock encryption to back up the vault.', 'error')
+      return
+    }
+    if (projects.length === 0) return
+    setBackingUp(true)
+    try {
+      const ctx: SyncContext = {
+        store,
+        io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+      }
+      const result = await backupAllProjects({
+        listProjects: () => vault.listProjects(),
+        listEnvFiles,
+        backup: async ({ project, fileName, filePath }) => {
+          await backupToVault(ctx, {
+            projectId: project.id,
+            identity: project.identity,
+            fileName,
+            filePath,
+          })
+        },
+      })
+      await refreshProjectsAndStats()
+      toast(describeBackupResult(result), result.failed > 0 ? 'error' : 'info')
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Back up all failed', 'error')
+    } finally {
+      setBackingUp(false)
+    }
+  }
+
+  async function exportVault(): Promise<void> {
+    if (!isUnlocked()) {
+      toast('Unlock encryption to export the vault.', 'error')
       return
     }
     if (projects.length === 0) return
     setBusy(true)
     try {
-      const directory = await pickProjectFolder()
-      if (directory === null) return
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
-      let exported = 0
-      let skipped = 0
-      let failed = 0
-      for (const project of projects) {
-        const names = trackableEnvFiles(
-          await listEnvFiles(project.folderPath).catch(() => [] as string[]),
-        )
-        if (names.length === 0) {
-          skipped += 1
-          continue
-        }
-        const contents: Record<string, string> = {}
-        for (const name of names) {
-          try {
-            contents[name] = await readEnvFile(joinPath(project.folderPath, name))
-          } catch {
-            // Missing/unreadable files are skipped; the rest still export.
-          }
-        }
-        if (Object.keys(contents).length === 0) {
-          skipped += 1
-          continue
-        }
-        try {
-          const bundle = await buildBundle({
-            identity: project.identity,
-            displayName: project.displayName,
-            files: contents,
-          })
-          const name = `${safeName(project.displayName)}-${safeName(project.identity)}-${stamp}.envmgr`
-          await writeEnvFile(joinPath(directory, name), serializeBundle(bundle))
-          exported += 1
-        } catch {
-          failed += 1
-        }
-      }
-      const parts = [`Exported ${exported} bundle${exported === 1 ? '' : 's'}`]
-      if (skipped > 0) parts.push(`skipped ${skipped}`)
-      if (failed > 0) parts.push(`failed ${failed}`)
-      toast(parts.join(' · '), failed > 0 ? 'error' : 'info')
+      const stamp = new Date().toISOString().slice(0, 10)
+      const path = await pickSaveFile(`env-manager-vault-${stamp}.db`, VAULT_FILTERS)
+      if (path === null) return
+      const result = await exportVaultFile(path)
+      toast(
+        `Exported ${result.projects} project${result.projects === 1 ? '' : 's'} and ${result.snapshots} snapshot${result.snapshots === 1 ? '' : 's'} to ${path}.`,
+      )
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Export failed', 'error')
     } finally {
@@ -249,64 +254,88 @@ export function SettingsScreen(): React.JSX.Element {
     }
   }
 
-  async function pickBundleForImport(): Promise<void> {
+  async function pickVaultForImport(): Promise<void> {
     setImportError('')
     setBusy(true)
     try {
-      const path = await pickOpenFile(BUNDLE_FILTERS)
+      const path = await pickOpenFile(VAULT_FILTERS)
       if (path === null) return
-      const bundle = parseBundle(await readEnvFile(path))
-      const rows = await vault.listProjects()
-      setProjects(rows)
-      const match = rows.find((project) => project.identity === bundle.project.identity)
-      if (match !== undefined) {
-        navigate(`/project/${encodeURIComponent(match.id)}`, { state: { bundlePath: path } })
+      const next = await readPortableVault(path)
+      if (!isUnlocked()) {
+        toast('Unlock encryption before importing a vault.', 'error')
         return
       }
-      setPendingImport({ bundle, path })
+      const sameSalt = next.meta.salt === currentSalt()
+      setPendingVault({
+        path,
+        vault: next,
+        needsPassphrase: !sameSalt && next.snapshots.length > 0,
+        passphrase: '',
+        error: '',
+      })
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Bundle import failed')
+      setImportError(err instanceof Error ? err.message : 'Vault import failed')
     } finally {
       setBusy(false)
     }
   }
 
-  async function addProjectForBundle(): Promise<void> {
-    if (pendingImport === null) return
-    setImportError('')
+  async function confirmVaultImport(): Promise<void> {
+    if (pendingVault === null) return
+    if (!isUnlocked()) {
+      toast('Unlock encryption before importing a vault.', 'error')
+      return
+    }
     setBusy(true)
+    setImportError('')
     try {
-      const folder = await pickProjectFolder()
-      if (folder === null) return
-      const rows = await vault.listProjects()
-      const byFolder = rows.find((project) => folderKey(project.folderPath) === folderKey(folder))
-      if (byFolder !== undefined && byFolder.identity !== pendingImport.bundle.project.identity) {
-        throw new Error(
-          `That folder is already linked to ${byFolder.identity}. Unlink it first, or choose another folder.`,
+      const local = await vault.listProjects()
+      for (const project of pendingVault.vault.projects) {
+        if (local.some((row) => row.identity === project.identity)) continue
+        const byFolder = local.find(
+          (row) => folderKey(row.folderPath) === folderKey(project.folderPath),
         )
+        if (byFolder !== undefined) {
+          throw new Error(
+            `Folder ${project.folderPath} is already linked to ${byFolder.identity}. Unlink that project first, then import.`,
+          )
+        }
       }
-      const existing =
-        byFolder ??
-        rows.find((project) => project.identity === pendingImport.bundle.project.identity) ??
-        (await vault.addProject({
-          identity: pendingImport.bundle.project.identity,
-          displayName: pendingImport.bundle.project.displayName,
-          folderPath: folder,
-        }))
+
+      const payload = await preparePortableImport(pendingVault.vault, {
+        passphrase: pendingVault.passphrase,
+      })
+      const result = await importPortableVault(payload)
+
       if (isTauri()) {
         const links = await linksRead().catch((): Record<string, string> => ({}))
-        links[existing.folderPath] = existing.identity
+        for (const project of pendingVault.vault.projects) {
+          links[project.folderPath] = project.identity
+        }
         await linksWrite(links).catch(() => {})
       }
-      const path = pendingImport.path
-      setPendingImport(null)
+
+      setPendingVault(null)
       await refreshProjectsAndStats()
-      navigate(`/project/${encodeURIComponent(existing.id)}`, { state: { bundlePath: path } })
+      const parts = [
+        `Imported ${result.projectsAdded} new project${result.projectsAdded === 1 ? '' : 's'}`,
+        `${result.snapshotsAdded} snapshot${result.snapshotsAdded === 1 ? '' : 's'}`,
+      ]
+      if (result.projectsKept > 0) parts.push(`${result.projectsKept} already linked`)
+      if (result.snapshotsSkipped > 0) parts.push(`${result.snapshotsSkipped} already present`)
+      toast(parts.join(' · '))
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Could not add the project')
+      const message = err instanceof Error ? err.message : 'Vault import failed'
+      setPendingVault((previous) => (previous === null ? null : { ...previous, error: message }))
+      setImportError(message)
     } finally {
       setBusy(false)
     }
+  }
+
+  function cancelVaultImport(): void {
+    setPendingVault(null)
+    setImportError('')
   }
 
   async function removeProject(project: ProjectRecord): Promise<void> {
@@ -328,7 +357,7 @@ export function SettingsScreen(): React.JSX.Element {
         <CardHeader>
           <CardTitle>Device</CardTitle>
           <CardDescription>
-            From your OS hostname — override it if you like. Used as the label in encrypted bundle
+            From your OS hostname — override it if you like. Used as the label in vault export
             metadata, not as a sync identity.
           </CardDescription>
         </CardHeader>
@@ -477,15 +506,34 @@ export function SettingsScreen(): React.JSX.Element {
               {statsError}
             </p>
           )}
+          <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:items-center">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={backUpAll}
+              disabled={!isTauri() || !unlocked || projects.length === 0 || busy || backingUp}
+              className="w-full sm:w-auto"
+            >
+              <Archive aria-hidden />
+              {backingUp ? 'Backing up…' : 'Back up all now'}
+            </Button>
+            <p className="text-sm text-muted-foreground">
+              {!unlocked
+                ? 'Unlock encryption to write snapshots.'
+                : projects.length === 0
+                  ? 'Add a project first.'
+                  : 'Writes an encrypted snapshot for every env file in every project.'}
+            </p>
+          </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Import / export</CardTitle>
+          <CardTitle>Vault file</CardTitle>
           <CardDescription>
-            Move encrypted <code>.envmgr</code> bundles by hand — USB drive, external disk,
-            anywhere. There is no server in the loop.
+            One encrypted <code>.db</code> file holds every project and snapshot. Move it by hand —
+            USB drive, external disk, anywhere. There is no server in the loop.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
@@ -493,29 +541,32 @@ export function SettingsScreen(): React.JSX.Element {
             <Button
               type="button"
               variant="secondary"
-              onClick={exportAllBundles}
+              onClick={exportVault}
               disabled={!isTauri() || !unlocked || projects.length === 0 || busy}
               className="w-full sm:w-auto"
             >
-              Export all bundles…
+              Export vault (.db)…
             </Button>
             <Button
               type="button"
               variant="outline"
-              onClick={pickBundleForImport}
+              onClick={pickVaultForImport}
               disabled={!isTauri() || busy}
               className="w-full sm:w-auto"
             >
-              Import bundle…
+              Import vault (.db)…
             </Button>
           </div>
+          <p className="text-sm text-muted-foreground">
+            Project names and folder paths are plaintext metadata; secret values stay encrypted.
+            The file never contains plaintext hashes.
+          </p>
           {!unlocked && (
             <p className="text-sm text-muted-foreground">
-              Unlock encryption to export bundles. Importing an encrypted bundle routes to its
-              project, where you can enter the bundle passphrase.
+              Unlock encryption to export or import the vault.
             </p>
           )}
-          {importError !== '' && pendingImport === null && (
+          {importError !== '' && pendingVault === null && (
             <p role="alert" className="text-sm text-destructive">
               {importError}
             </p>
@@ -523,36 +574,68 @@ export function SettingsScreen(): React.JSX.Element {
         </CardContent>
       </Card>
 
-      {pendingImport !== null && (
+      {pendingVault !== null && (
         <Card>
           <CardHeader>
-            <CardTitle>No matching project</CardTitle>
+            <CardTitle>Import this vault file?</CardTitle>
             <CardDescription>
-              This bundle is for <code>{pendingImport.bundle.project.identity}</code>. Choose the
-              folder for this project on this device, then import it.
+              {pendingVault.vault.projects.length} project
+              {pendingVault.vault.projects.length === 1 ? '' : 's'} ·{' '}
+              {pendingVault.vault.snapshots.length} snapshot
+              {pendingVault.vault.snapshots.length === 1 ? '' : 's'} from{' '}
+              {pendingVault.vault.meta.deviceName} · exported{' '}
+              {new Date(pendingVault.vault.meta.createdAt).toLocaleString()}. Import merges into
+              this vault; nothing local is deleted.
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex flex-col gap-2">
+          <CardContent className="flex flex-col gap-3">
+            {pendingVault.needsPassphrase && (
+              <Input
+                type="password"
+                autoComplete="off"
+                aria-label="Vault file passphrase"
+                placeholder="Passphrase for this vault file"
+                value={pendingVault.passphrase}
+                onChange={(e) =>
+                  setPendingVault((previous) =>
+                    previous === null
+                      ? null
+                      : { ...previous, passphrase: e.target.value, error: '' },
+                  )
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && pendingVault.passphrase !== '') void confirmVaultImport()
+                }}
+              />
+            )}
+            {!pendingVault.needsPassphrase && (
+              <p className="text-sm text-muted-foreground">
+                Encrypted with this vault's passphrase. Snapshots reuse the local key and duplicate
+                content is skipped.
+              </p>
+            )}
+            {pendingVault.error !== '' && (
+              <p role="alert" className="text-sm text-destructive">
+                {pendingVault.error}
+              </p>
+            )}
             <div className="flex flex-col gap-2 sm:flex-row">
-              <Button type="button" onClick={addProjectForBundle} disabled={busy}>
-                {busy ? 'Adding…' : 'Choose folder & add'}
-              </Button>
               <Button
                 type="button"
-                variant="outline"
-                onClick={() => {
-                  setPendingImport(null)
-                  setImportError('')
-                }}
+                onClick={confirmVaultImport}
+                disabled={busy || (pendingVault.needsPassphrase && pendingVault.passphrase === '')}
               >
+                {busy ? 'Importing…' : 'Import vault'}
+              </Button>
+              <Button type="button" variant="outline" onClick={cancelVaultImport} disabled={busy}>
                 Cancel
               </Button>
             </div>
-            {importError !== '' && (
-              <p role="alert" className="text-sm text-destructive">
-                {importError}
-              </p>
-            )}
+            <p className="text-sm text-muted-foreground">
+              New projects keep the folder paths saved in the file. Projects already linked keep
+              their local path. If a path does not exist on this device, move the project there
+              before restoring.
+            </p>
           </CardContent>
         </Card>
       )}

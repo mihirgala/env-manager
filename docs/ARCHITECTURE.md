@@ -1,11 +1,11 @@
 # Architecture — env-manager
 
 ```
-+-------------------+        +------------------------+        +------------------+
-|  Desktop GUI      |        |  Local vault           |        |  .envmgr bundle  |
-|  Tauri + Vite     | <----> |  ~/.env-manager/       | <----> |  ciphertext only |
-|  React + TS       |        |  SQLite + snapshots    |  move  |  (manual copy)   |
-+-------------------+        +------------------------+        +------------------+
++-------------------+        +------------------------+        +---------------------+
+|  Desktop GUI      |        |  Local vault           |        |  env-manager .db    |
+|  Tauri + Vite     | <----> |  ~/.env-manager/       | <----> |  all projects,      |
+|  React + TS       |        |  SQLite + snapshots    |  move  |  ciphertext only    |
++-------------------+        +------------------------+        +---------------------+
         | reads/writes plain .env files in place (comments + order preserved)
         v
   your projects (untouched repos)
@@ -19,7 +19,8 @@ no server, no account, and no network call in the shipping app.
 
 1. Plaintext only lives in `.env` files on disk and in memory while unlocked.
 2. The vault stores opaque `CryptoEnvelope` rows plus a local `plaintext_sha256` used only for
-   conflict detection. Bundles carry ciphertext and no hashes.
+   conflict detection. Portable vault files carry ciphertext, project metadata, and the public salt —
+   never plaintext or hashes.
 3. Passphrase, master key, DEKs, and plaintext are never logged and never written unencrypted.
 4. Restore/import never overwrites silently: show a key-level diff, write `.env.backup-<ts>`, then
    apply.
@@ -33,7 +34,7 @@ no server, no account, and no network call in the shipping app.
 | Project map | `~/.env-manager/links.json` | Local metadata only (folder → identity) |
 | Device/theme/salt metadata | `~/.env-manager/config.json` | Local metadata; salt is not secret |
 | Snapshots | `~/.env-manager/vault.db` | XChaCha20-Poly1305 ciphertext + local hash |
-| Portable backup | user-chosen `*.envmgr` | XChaCha20-Poly1305 ciphertext, no hashes |
+| Portable vault file | user-chosen `.db` | One file: project metadata + XChaCha20-Poly1305 ciphertext; no hashes |
 | Passphrase / master key / DEK | memory only | Never persisted; wiped on lock |
 
 ## Module map
@@ -42,12 +43,12 @@ no server, no account, and no network call in the shipping app.
 |---|---|---|
 | Project identity | `src/lib/identity.ts` | Normalize `git remote origin` → `github.com/foo/bar`; monorepo `identity::subpath`; manual UUID fallback in `links.json`, never in the repo |
 | Lossless dotenv | `src/lib/dotenv.ts` | Preserves comments, order, quoting, blank lines, `export` prefixes; only values change on save. Fixtures in `src/lib/__fixtures__/`, round-trip tests in `dotenv.test.ts` |
-| Env-file policy | `src/lib/env-files.ts` | Which `.env*` names are trackable; shared by scan, bundles, and UI |
+| Env-file policy | `src/lib/env-files.ts` | Which `.env*` names are trackable; shared by scan, portable import/export, and UI |
 | Crypto | `src/lib/crypto.ts` | libsodium in TS: passphrase → Argon2id → master key → portable per-file DEKs (`BLAKE2b(master, "identity:fileName")`) → XChaCha20-Poly1305 with `fileName` as AAD. Envelope `{ v, salt, nonce, algo, ciphertext }` |
 | Local vault | `src/lib/vault.ts` | Project rows via a storage driver; default driver calls Rust SQLite commands |
 | Snapshot store | `src/lib/store.ts` | Append-only encrypted rows, per-file retention (20), local `plaintext_sha256` |
 | Snapshot policy | `src/lib/sync.ts` | `backupToVault`, `planRestore`, `applyRestore`, `projectStatus`, `applyImportedText`; diff-first, backup-before-write |
-| Bundles | `src/lib/bundle.ts` | Strict parse, encrypted `.envmgr` build/serialize/decrypt; identity + one envelope per file; no plaintext or hashes |
+| Portable vault | `src/lib/portable.ts` | Strict `.db` format validation, one-file export, same-salt envelope reuse, different-salt re-encryption, merge policy; no plaintext or hashes in the file |
 | Parent-folder scan | `src/lib/scan.ts` | Turns read-only Rust rows into portable candidates, duplicate/template filtering |
 | Paths | `src/lib/paths.ts` | Cross-platform join + folder comparison keys |
 | Theme | `src/lib/theme.ts` + `src/components/theme-provider.tsx` | System/Light/Dark, config source of truth, synchronous mirror, no-flash boot, native window theme |
@@ -74,10 +75,12 @@ the UI reports the backup failure.
 changed / removed keys. The user confirms "Backup + apply"; `applyRestore` writes
 `.env.backup-<ts>` and then the file, and records an import snapshot.
 
-**Export / import bundle:** `buildBundle` reads trackable files, encrypts each with the current
-master key, and writes an `.envmgr` the user copies by hand. Import parses strictly, checks the
-identity, decrypts with the session key or a bundle passphrase, shows a per-file diff, then applies
-selected files with backups.
+**Export / import the vault:** `vault_export` copies every project and encrypted snapshot into one
+standalone `.db` file the user moves by hand. `vault_read` returns opaque rows; `parsePortableVault`
+validates the format. Import merges (never deletes): same-salt envelopes are reused, different-salt
+files are decrypted once with the file passphrase and re-encrypted under the local key, and duplicate
+snapshot content is skipped. Folder paths are portable metadata; a missing path must be restored
+manually.
 
 **Plaintext escape hatch:** export writes an explicit plaintext file and warns it is unencrypted.
 Import validates the file name against the env-file policy, shows a diff, backs up the target, and
@@ -90,11 +93,11 @@ Tauri to match native chrome.
 ## Rust boundary
 
 Allowed commands: `read_env_file`, `write_env_file`, `list_env_files`, `git_remote_get_url`,
-`file_stat`, project/snapshot SQLite rows, `links_*`, `config_*`, dialogs (plugin), and
-`scan_env_projects` / `scan_cancel`.
+`file_stat`, project/snapshot SQLite rows, `vault_export` / `vault_read` / `vault_import`,
+`links_*`, `config_*`, dialogs (plugin), and `scan_env_projects` / `scan_cancel`.
 
-Forbidden in Rust: crypto, dotenv parsing, sync/restore policy, bundle format, env-file filtering,
-theme decisions. Those are pure TypeScript with unit tests.
+Forbidden in Rust: crypto, dotenv parsing, sync/restore policy, portable vault format/merge policy,
+env-file filtering, theme decisions. Those are pure TypeScript with unit tests.
 
 ## Development
 

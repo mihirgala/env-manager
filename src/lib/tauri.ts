@@ -31,7 +31,7 @@ export interface DialogFilter {
   extensions: string[]
 }
 
-/** Save dialog (bundles / plaintext exports). Returns null when cancelled. */
+/** Save dialog (vault file / plaintext exports). Returns null when cancelled. */
 export async function pickSaveFile(
   defaultName: string,
   filters: DialogFilter[],
@@ -45,7 +45,7 @@ export async function pickSaveFile(
   return typeof picked === 'string' ? picked : null
 }
 
-/** Open dialog (bundle / plaintext import). Returns null when cancelled. */
+/** Open dialog (vault file / plaintext import). Returns null when cancelled. */
 export async function pickOpenFile(filters: DialogFilter[]): Promise<string | null> {
   if (!isTauri()) {
     const manual = window.prompt('File path (dev fallback — dialog needs `tauri dev`):')
@@ -205,6 +205,81 @@ export async function snapshotList(
 
 export async function snapshotDelete(id: string): Promise<void> {
   await invoke('snapshot_delete', { id })
+}
+
+/** One portable vault row as returned by Rust (`envelope` is JSON text). */
+export interface PortableProjectWire {
+  identity: string
+  displayName: string
+  folderPath: string
+  createdAt: string
+}
+
+export interface PortableSnapshotWire {
+  identity: string
+  fileName: string
+  envelope: string
+  source: string
+  createdAt: string
+}
+
+export interface PortableVaultWire {
+  meta: Record<string, string>
+  projects: PortableProjectWire[]
+  snapshots: PortableSnapshotWire[]
+}
+
+export interface VaultExportSummary {
+  projects: number
+  snapshots: number
+}
+
+export interface VaultImportProject {
+  identity: string
+  displayName: string
+  folderPath: string
+  createdAt: string
+}
+
+export interface VaultImportSnapshot {
+  identity: string
+  fileName: string
+  envelope: string
+  plaintextSha256: string
+  source: string
+  createdAt: string
+}
+
+export interface VaultImportPayload {
+  projects: VaultImportProject[]
+  snapshots: VaultImportSnapshot[]
+}
+
+export interface VaultImportSummary {
+  projectsAdded: number
+  projectsKept: number
+  snapshotsAdded: number
+  snapshotsSkipped: number
+}
+
+/** Write one standalone `.db` with all projects + encrypted snapshots. */
+export async function vaultExport(input: {
+  path: string
+  salt: string
+  deviceName: string
+  createdAt: string
+}): Promise<VaultExportSummary> {
+  return invoke<VaultExportSummary>('vault_export', input)
+}
+
+/** Read a portable `.db`; Rust only returns opaque rows. */
+export async function vaultRead(path: string): Promise<PortableVaultWire> {
+  return invoke<PortableVaultWire>('vault_read', { path })
+}
+
+/** Merge already re-encrypted rows into the local vault in one transaction. */
+export async function vaultImport(payload: VaultImportPayload): Promise<VaultImportSummary> {
+  return invoke<VaultImportSummary>('vault_import', { payload })
 }
 
 export async function linksRead(): Promise<Record<string, string>> {
