@@ -153,6 +153,11 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   (all visible controls >= 44px), and keyboard order now pass. Still blocked: `pnpm tauri
   build`, installer install/launch, native unlock/scan/restore/import, and title-bar checks
   (no rustc/cargo/MSVC and no desktop Tauri session). Step stays unchecked until those run.
+- **2026-10-23 — CI fix.** The macOS job compiled, then failed at bundle time importing an empty
+  keychain certificate. Removed the empty `APPLE_*` secrets from the release workflow (Tauri
+  treats an empty value as present); docs now warn about this trap. Also changed the bundle
+  identifier from `com.envmanager.app` to `com.envmanager.desktop` because a macOS bundle id
+  must not end in `.app`.
 
 ## Environment notes
 
