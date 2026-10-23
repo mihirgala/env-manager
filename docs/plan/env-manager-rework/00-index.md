@@ -83,7 +83,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 4. Import/export bundles
 - [x] 5. Parent-folder scan
 - [x] 6. Screens rewiring
-- [ ] 7. Dark mode
+- [x] 7. Dark mode
 - [ ] 8. Skills + docs
 - [ ] 9. Packaging + CI
 - [ ] 10. Verification
@@ -121,6 +121,13 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   the no-keychain copy; Projects gained Scan folder + clearer badges; Add Project reports
   duplicate identities with a link. Shared `paths.ts`. `pnpm test` (63) + `pnpm build` green.
   Appearance selector is intentionally left for step 7 (dark mode).
+- **2026-10-23 — step 7 done.** Added the Tailwind class-based `dark` variant, success/warning
+  palette tokens + stronger dark destructive contrast, `theme.ts` (mirror, resolve, apply,
+  matchMedia watcher), `ThemeProvider` (config ↔ mirror reconcile, live OS follow, native
+  `setTheme`), header cycle toggle, Settings Appearance card, and the inline no-flash boot
+  script + `color-scheme` meta. `core:window:allow-set-theme` granted. `pnpm test` (70) +
+  `pnpm build` green; native title-bar + 360px visual checks remain manual/CI (no desktop
+  browser or cargo here).
 
 ## Environment notes
 

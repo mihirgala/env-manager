@@ -1,5 +1,7 @@
+import { Monitor, Moon, Sun } from 'lucide-react'
 import * as React from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useTheme } from '@/components/theme-provider'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -30,6 +32,12 @@ import { ensureDeviceName, loadConfig, saveConfig } from '@/lib/config'
 
 const BUNDLE_FILTERS: DialogFilter[] = [{ name: 'env-manager bundle', extensions: ['envmgr'] }]
 
+const themeOptions = [
+  { value: 'system', label: 'System', icon: Monitor },
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+] as const
+
 interface VaultStats {
   snapshots: number
   bytes: number
@@ -55,6 +63,7 @@ function formatBytes(bytes: number): string {
 export function SettingsScreen(): React.JSX.Element {
   const toast = useToast()
   const navigate = useNavigate()
+  const { preference, resolved, setPreference } = useTheme()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
   const store = React.useMemo(() => createTauriStore(), [])
   const [deviceName, setDeviceName] = React.useState('')
@@ -334,6 +343,40 @@ export function SettingsScreen(): React.JSX.Element {
           <Button type="button" variant="secondary" onClick={saveDeviceName} disabled={!isTauri()}>
             Save
           </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Appearance</CardTitle>
+          <CardDescription>
+            Follows your OS theme when set to System. The choice is saved on this device and
+            applied before the first paint.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2 sm:flex-row" role="group" aria-label="Theme">
+            {themeOptions.map(({ value, label, icon: Icon }) => {
+              const active = preference === value
+              return (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={active ? 'secondary' : 'outline'}
+                  aria-pressed={active}
+                  onClick={() => setPreference(value)}
+                  className="w-full sm:w-auto"
+                >
+                  <Icon aria-hidden />
+                  {label}
+                </Button>
+              )
+            })}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Currently using the {resolved} theme
+            {preference === 'system' ? ' (following your OS).' : '.'}
+          </p>
         </CardContent>
       </Card>
 

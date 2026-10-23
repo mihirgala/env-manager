@@ -15,11 +15,12 @@
  */
 
 import type { RecoveryBlob } from './crypto'
+import type { ThemePreference } from './theme'
 import { isTauri, configRead, configWrite, getDeviceName } from './tauri'
 
 export interface AppConfig {
   deviceName?: string
-  theme?: 'system' | 'light' | 'dark'
+  theme?: ThemePreference
   cryptoSalt?: string
   recoveryBlob?: RecoveryBlob
   seenOnboarding?: boolean
