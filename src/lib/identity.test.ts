@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { detectIdentity, normalizeGitRemote } from './identity'
+import {
+  detectIdentity,
+  normalizeGitRemote,
+  normalizeSubpath,
+  splitSubpath,
+  withSubpath,
+} from './identity'
 
 describe('normalizeGitRemote', () => {
   it('normalizes scp-like SSH remotes', () => {
@@ -22,6 +28,31 @@ describe('normalizeGitRemote', () => {
   it('rejects empty and unparsable URLs', () => {
     expect(() => normalizeGitRemote('')).toThrow()
     expect(() => normalizeGitRemote('just-a-name')).toThrow()
+  })
+})
+
+describe('monorepo subpaths', () => {
+  it('normalizes Windows separators and ./ prefixes', () => {
+    expect(normalizeSubpath('apps\\web')).toBe('apps/web')
+    expect(normalizeSubpath('./apps/web/')).toBe('apps/web')
+    expect(normalizeSubpath('apps//web')).toBe('apps/web')
+    expect(normalizeSubpath('Apps/Web')).toBe('Apps/Web')
+  })
+
+  it('appends and splits :: identities', () => {
+    expect(withSubpath('github.com/foo/bar', 'apps/web')).toBe('github.com/foo/bar::apps/web')
+    expect(withSubpath('github.com/foo/bar', './apps\\web/')).toBe(
+      'github.com/foo/bar::apps/web',
+    )
+    expect(withSubpath('github.com/foo/bar::old', 'new')).toBe('github.com/foo/bar::new')
+    expect(splitSubpath('github.com/foo/bar::apps/web')).toEqual({
+      identity: 'github.com/foo/bar',
+      subpath: 'apps/web',
+    })
+    expect(splitSubpath('github.com/foo/bar')).toEqual({
+      identity: 'github.com/foo/bar',
+      subpath: '',
+    })
   })
 })
 

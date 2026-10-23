@@ -6,9 +6,13 @@
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::{AppHandle, Emitter, State};
 
 // ---------------------------------------------------------------------------
 // Paths (~/.env-manager/)
@@ -351,6 +355,193 @@ fn snapshot_delete(id: String) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Parent-folder scan (read-only: names + git remotes, never file contents)
+// ---------------------------------------------------------------------------
+
+/// Shared cancel flag for the in-flight scan (`scan_cancel` flips it).
+#[derive(Default)]
+struct ScanCancel(Arc<AtomicBool>);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanRow {
+    folder_path: String,
+    repo_root: String,
+    repo_subpath: String,
+    git_remote: Option<String>,
+    env_files: Vec<String>,
+    is_git: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgress {
+    scanned: u64,
+    found: u64,
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn relative_posix(root: &Path, folder: &Path) -> String {
+    match folder.strip_prefix(root) {
+        Ok(relative) => relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => String::new(),
+    }
+}
+
+fn scan_blocking(
+    app: AppHandle,
+    root: String,
+    max_depth: u32,
+    skip_dirs: Vec<String>,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<ScanRow>, String> {
+    let root_path = PathBuf::from(&root);
+    let meta = std::fs::metadata(&root_path).map_err(|e| format!("scan root {root}: {e}"))?;
+    if !meta.is_dir() {
+        return Err(format!("scan root {root}: not a folder"));
+    }
+
+    let depth_limit = if max_depth == 0 { 3 } else { max_depth };
+    let skip: HashSet<String> = skip_dirs.iter().map(|name| name.to_lowercase()).collect();
+    let mut remote_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    let mut rows: Vec<ScanRow> = Vec::new();
+    let mut stack: Vec<(PathBuf, u32, Option<PathBuf>)> =
+        vec![(root_path.clone(), 0, find_git_root(&root_path))];
+    let mut scanned: u64 = 0;
+    const VISIT_CAP: u64 = 20_000;
+
+    while let Some((dir, depth, repo_root)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) || scanned >= VISIT_CAP {
+            break;
+        }
+        scanned += 1;
+        if scanned % 200 == 0 {
+            let _ = app.emit(
+                "scan://progress",
+                ScanProgress { scanned, found: rows.len() as u64 },
+            );
+        }
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // Permission errors and disappearing folders are skipped.
+            Err(_) => continue,
+        };
+
+        let mut env_files: Vec<String> = Vec::new();
+        let mut children: Vec<PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            // Never follow symlinks (loops + escaping the chosen root).
+            if file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if file_type.is_dir() {
+                if name.starts_with('.') || skip.contains(&name.to_lowercase()) {
+                    continue;
+                }
+                if depth < depth_limit {
+                    children.push(entry.path());
+                }
+            } else if file_type.is_file() && (name == ".env" || name.starts_with(".env.")) {
+                // Raw names only; TS applies `isTrackableEnvFile`.
+                env_files.push(name);
+            }
+        }
+
+        if !env_files.is_empty() {
+            env_files.sort();
+            let (row_root, row_subpath, is_git) = match &repo_root {
+                Some(repo) => (repo.clone(), relative_posix(repo, &dir), true),
+                None => (dir.clone(), String::new(), false),
+            };
+            let git_remote = if is_git {
+                let cached = remote_cache.get(&row_root).cloned();
+                match cached {
+                    Some(value) => value,
+                    None => {
+                        let value = git_remote_get_url(row_root.to_string_lossy().to_string())
+                            .ok()
+                            .flatten();
+                        remote_cache.insert(row_root.clone(), value.clone());
+                        value
+                    }
+                }
+            } else {
+                None
+            };
+            rows.push(ScanRow {
+                folder_path: dir.to_string_lossy().to_string(),
+                repo_root: row_root.to_string_lossy().to_string(),
+                repo_subpath: row_subpath,
+                git_remote,
+                env_files,
+                is_git,
+            });
+        }
+
+        for child in children {
+            let child_repo = if child.join(".git").exists() {
+                Some(child.clone())
+            } else {
+                repo_root.clone()
+            };
+            stack.push((child, depth + 1, child_repo));
+        }
+    }
+
+    let _ = app.emit(
+        "scan://progress",
+        ScanProgress { scanned, found: rows.len() as u64 },
+    );
+    Ok(rows)
+}
+
+#[tauri::command]
+async fn scan_env_projects(
+    app: AppHandle,
+    state: State<'_, ScanCancel>,
+    root: String,
+    max_depth: u32,
+    skip_dirs: Vec<String>,
+) -> Result<Vec<ScanRow>, String> {
+    state.0.store(false, Ordering::SeqCst);
+    let cancel = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_blocking(app, root, max_depth, skip_dirs, cancel)
+    })
+    .await
+    .map_err(|e| format!("scan task failed: {e}"))?
+}
+
+#[tauri::command]
+fn scan_cancel(state: State<'_, ScanCancel>) {
+    state.0.store(true, Ordering::SeqCst);
+}
+
+// ---------------------------------------------------------------------------
 // links.json / config.json (plain JSON files under ~/.env-manager/)
 // ---------------------------------------------------------------------------
 
@@ -514,6 +705,7 @@ fn git_remote_get_url(path: String) -> Result<Option<String>, String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .manage(ScanCancel::default())
         .invoke_handler(tauri::generate_handler![
             read_env_file,
             write_env_file,
@@ -530,6 +722,8 @@ fn main() {
             snapshot_latest,
             snapshot_list,
             snapshot_delete,
+            scan_env_projects,
+            scan_cancel,
             links_read,
             links_write,
             config_read,

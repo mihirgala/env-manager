@@ -50,6 +50,34 @@ export function normalizeGitRemote(url: string): string {
   return `${host}/${owner}/${repo}`
 }
 
+/** Monorepo subpath separator inside a portable identity. */
+export const SUBPATH_SEPARATOR = '::'
+
+/** `apps\web`, `./apps/web/`, `apps//web` → `apps/web` (case preserved). */
+export function normalizeSubpath(subpath: string): string {
+  return subpath
+    .replace(/\\/g, '/')
+    .split('/')
+    .filter((part) => part !== '' && part !== '.')
+    .join('/')
+}
+
+/** Base identity + subpath, e.g. `github.com/foo/bar::apps/web`. */
+export function withSubpath(identity: string, subpath: string): string {
+  const base = splitSubpath(identity).identity
+  const normalized = normalizeSubpath(subpath)
+  return normalized === '' ? base : `${base}${SUBPATH_SEPARATOR}${normalized}`
+}
+
+export function splitSubpath(identity: string): { identity: string; subpath: string } {
+  const at = identity.indexOf(SUBPATH_SEPARATOR)
+  if (at === -1) return { identity: identity.trim(), subpath: '' }
+  return {
+    identity: identity.slice(0, at).trim(),
+    subpath: normalizeSubpath(identity.slice(at + SUBPATH_SEPARATOR.length)),
+  }
+}
+
 export function detectIdentity(input: { folderPath: string; gitRemoteUrl?: string }): ProjectIdentity {
   const folderPath = input.folderPath.trim()
   if (folderPath === '') throw new Error('detectIdentity: folderPath is required')

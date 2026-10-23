@@ -81,7 +81,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 2. Portable crypto
 - [x] 3. SQLite vault + snapshots
 - [x] 4. Import/export bundles
-- [ ] 5. Parent-folder scan
+- [x] 5. Parent-folder scan
 - [ ] 6. Screens rewiring
 - [ ] 7. Dark mode
 - [ ] 8. Skills + docs
@@ -108,6 +108,12 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   build/serialize/decrypt, no plaintext or sha), `env-files.ts` policy, save/open dialog
   adapters + `dialog:allow-save`, and `applyImportedText` so plaintext/bundle imports back
   up before writing with `source: 'import'`. `pnpm test` (51) + `pnpm build` green.
+- **2026-10-23 — step 5 done.** Rust `scan_env_projects` + `scan_cancel` walk a parent folder
+  read-only (depth 3, 20k cap, skip list, no symlinks, progress + cancel), and `scan.ts`
+  turns rows into portable `identity::subpath` candidates with duplicate/template filtering.
+  Rebuilt Add Project with folder/scan tabs, 360px-safe result cards, bulk add + optional
+  backups. `pnpm test` (61) + `pnpm build` green; Rust not compiled locally (cargo absent) —
+  CI validates the scan commands.
 
 ## Environment notes
 

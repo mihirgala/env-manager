@@ -114,6 +114,44 @@ export async function fileStat(path: string): Promise<FileStat | null> {
   return invoke<FileStat | null>('file_stat', { path })
 }
 
+/** One folder produced by the read-only parent-folder scan. */
+export interface ScanRow {
+  folderPath: string
+  repoRoot: string
+  repoSubpath: string
+  gitRemote: string | null
+  /** Raw `.env*` names directly in the folder — TS applies the policy. */
+  envFiles: string[]
+  /** Present from Rust; optional so tests can use minimal rows. */
+  isGit?: boolean
+}
+
+export interface ScanProgress {
+  scanned: number
+  found: number
+}
+
+export async function scanEnvProjects(input: {
+  root: string
+  maxDepth: number
+  skipDirs: string[]
+}): Promise<ScanRow[]> {
+  return invoke<ScanRow[]>('scan_env_projects', input)
+}
+
+export async function cancelScan(): Promise<void> {
+  await invoke('scan_cancel')
+}
+
+/** Subscribe to progress; returns the unlisten function. */
+export async function listenScanProgress(
+  callback: (progress: ScanProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<ScanProgress>('scan://progress', (event) => callback(event.payload))
+}
+
 /** Copies `<path>` to `<path>.backup-<ts>`; returns the backup path. */
 export async function backupEnvFile(path: string): Promise<string> {
   return invoke<string>('backup_env_file', { path })
