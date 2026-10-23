@@ -143,6 +143,16 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   secret-gated signing hooks), updated `docs/DISTRIBUTION.md` and `.gitignore`. Workflow YAML
   parses; `pnpm test` (70) + `pnpm build` green. Local `pnpm tauri build` could not run
   (rustc/cargo + MSVC build tools absent), so installer smoke-testing remains CI/manual.
+- **2026-10-23 — step 10 in progress (automated + web QA green; native blocked).** Clean-clone
+  `pnpm install --frozen-lockfile`, `pnpm test` (70), and `pnpm build` pass. Static checks are
+  clean (no server/auth/keychain symbols, npm commands, tracked env/vault/bundle/backup/target
+  files, or network calls; vault rows are ciphertext + local sha only). Web QA at
+  360/1280/1440 in light and dark found and fixed: Projects invoking Tauri in browser mode,
+  Settings vault copy stuck on "Reading vault…", a clipped remote placeholder, 36px sidebar
+  targets, and a 20px breadcrumb target. Mock-backed Projects/detail shots, tap-target audit
+  (all visible controls >= 44px), and keyboard order now pass. Still blocked: `pnpm tauri
+  build`, installer install/launch, native unlock/scan/restore/import, and title-bar checks
+  (no rustc/cargo/MSVC and no desktop Tauri session). Step stays unchecked until those run.
 
 ## Environment notes
 
