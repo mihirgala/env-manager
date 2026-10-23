@@ -1,6 +1,7 @@
 import { FolderPlus } from 'lucide-react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { AppSidebar } from '@/components/app-sidebar'
+import { ThemeToggle } from '@/components/theme-toggle'
 import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 
@@ -27,7 +28,7 @@ function Breadcrumb(): React.JSX.Element {
               {c.to !== undefined && !last ? (
                 <Link
                   to={c.to}
-                  className="shrink-0 rounded text-muted-foreground transition-colors hover:text-foreground"
+                  className="inline-flex min-h-[44px] shrink-0 items-center rounded text-muted-foreground transition-colors hover:text-foreground"
                 >
                   {c.label}
                 </Link>
@@ -49,7 +50,7 @@ export function Layout(): React.JSX.Element {
     <SidebarProvider defaultOpen>
       <AppSidebar />
       <SidebarInset>
-        <header className="sticky top-0 z-10 flex min-h-[68px] shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b bg-background/95 px-2 py-2 backdrop-blur sm:px-4">
+        <header className="sticky top-0 z-10 flex min-h-[68px] shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b bg-background/95 px-2 py-2 backdrop-blur dark:bg-background/[0.98] sm:px-4">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <SidebarTrigger />
             <Separator orientation="vertical" className="h-6" />
@@ -57,6 +58,7 @@ export function Layout(): React.JSX.Element {
               <Breadcrumb />
             </div>
           </div>
+          <ThemeToggle />
           <Link
             to="/add"
             className="inline-flex min-h-[44px] shrink-0 items-center justify-center gap-2 rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:opacity-90 sm:px-4"

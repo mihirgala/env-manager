@@ -1,0 +1,4 @@
+# Lossless dotenv fixtures are byte-compared in round-trip tests.
+# -text disables git's EOL conversion so the LF bytes in the repo are what
+# the tests read on every platform (Windows core.autocrlf included).
+*.env -text

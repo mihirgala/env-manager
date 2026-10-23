@@ -1,12 +1,26 @@
+import { Monitor, Moon, Sun } from 'lucide-react'
 import * as React from 'react'
-import { Link } from 'react-router-dom'
-import { Badge } from '@/components/ui/badge'
+import { Link, useNavigate } from 'react-router-dom'
+import { useTheme } from '@/components/theme-provider'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
-import { GitHubSignInButton } from '@/components/github-sign-in'
 import { useToast } from '@/components/toaster'
-import { isTauri, configRead, configWrite, listEnvFiles, readEnvFile } from '@/lib/tauri'
+import { buildBundle, parseBundle, serializeBundle, type Bundle } from '@/lib/bundle'
+import { trackableEnvFiles } from '@/lib/env-files'
+import { folderKey, joinPath } from '@/lib/paths'
+import { createTauriStore } from '@/lib/store'
+import {
+  isTauri,
+  linksRead,
+  linksWrite,
+  listEnvFiles,
+  pickOpenFile,
+  pickProjectFolder,
+  readEnvFile,
+  writeEnvFile,
+  type DialogFilter,
+} from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import {
   generateRecoveryKey,
@@ -14,21 +28,44 @@ import {
   lock,
   setupPassphrase,
 } from '@/lib/crypto'
-import { clearCustomCloud, effectiveCloudEndpoint, ensureDeviceName, hostedCloudEndpoint, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
+import { ensureDeviceName, loadConfig, saveConfig } from '@/lib/config'
 
-function downloadFile(name: string, text: string): void {
-  const blob = new Blob([text], { type: 'text/plain' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  a.click()
-  URL.revokeObjectURL(url)
+const BUNDLE_FILTERS: DialogFilter[] = [{ name: 'env-manager bundle', extensions: ['envmgr'] }]
+
+const themeOptions = [
+  { value: 'system', label: 'System', icon: Monitor },
+  { value: 'light', label: 'Light', icon: Sun },
+  { value: 'dark', label: 'Dark', icon: Moon },
+] as const
+
+interface VaultStats {
+  snapshots: number
+  bytes: number
+  lastBackup: string | null
+}
+
+interface PendingImport {
+  bundle: Bundle
+  path: string
+}
+
+function safeName(name: string): string {
+  const safe = name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim()
+  return safe === '' ? 'project' : safe.slice(0, 80)
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export function SettingsScreen(): React.JSX.Element {
   const toast = useToast()
+  const navigate = useNavigate()
+  const { preference, resolved, setPreference } = useTheme()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
+  const store = React.useMemo(() => createTauriStore(), [])
   const [deviceName, setDeviceName] = React.useState('')
   const [projects, setProjects] = React.useState<ProjectRecord[]>([])
   const [hasEncryption, setHasEncryption] = React.useState(false)
@@ -36,62 +73,71 @@ export function SettingsScreen(): React.JSX.Element {
   const [passphrase, setPassphrase] = React.useState('')
   const [recoveryCode, setRecoveryCode] = React.useState<string | null>(null)
   const [recoveryConfirm, setRecoveryConfirm] = React.useState('')
-  const [cloudUrl, setCloudUrl] = React.useState('')
-  const [cloudKey, setCloudKey] = React.useState('')
-  const [cloudOn, setCloudOn] = React.useState(false)
-  const [cloudSrc, setCloudSrc] = React.useState<'custom' | 'hosted' | null>(null)
-  const [hostedReady, setHostedReady] = React.useState(false)
-  const [testing, setTesting] = React.useState(false)
-  const [sessionEmail, setSessionEmail] = React.useState<string | null>(null)
-  const [signedIn, setSignedIn] = React.useState(false)
-  const [knownDevices, setKnownDevices] = React.useState<{ name: string; lastSeen: string }[]>([])
-  const [cloudDevices, setCloudDevices] = React.useState<{ name: string; lastPush: string }[]>([])
+  const [stats, setStats] = React.useState<VaultStats | null>(null)
+  const [statsError, setStatsError] = React.useState('')
+  const [busy, setBusy] = React.useState(false)
+  const [pendingImport, setPendingImport] = React.useState<PendingImport | null>(null)
+  const [importError, setImportError] = React.useState('')
+
+  const computeStats = React.useCallback(
+    async (rows: ProjectRecord[]): Promise<VaultStats> => {
+      let snapshots = 0
+      let bytes = 0
+      let lastBackup: string | null = null
+      for (const project of rows) {
+        const found = trackableEnvFiles(
+          await listEnvFiles(project.folderPath).catch(() => [] as string[]),
+        )
+        const names = found.length > 0 ? found : ['.env']
+        for (const name of names) {
+          const stored = await store.list(project.id, name, 20).catch(() => [])
+          snapshots += stored.length
+          for (const row of stored) {
+            bytes += JSON.stringify(row.envelope).length
+            if (lastBackup === null || row.createdAt > lastBackup) lastBackup = row.createdAt
+          }
+        }
+      }
+      return { snapshots, bytes, lastBackup }
+    },
+    [store],
+  )
 
   React.useEffect(() => {
     if (!isTauri()) return
+    let cancelled = false
     // Device label comes from the OS hostname unless the user overrode it.
     ensureDeviceName()
-      .then(setDeviceName)
-      .catch(() => {})
-    loadConfig()
-      .then(async (cfg) => {
-        setHasEncryption(cfg.cryptoSalt !== undefined)
-        setUnlocked(isUnlocked())
-        if (typeof cfg.cloudUrl === 'string') setCloudUrl(cfg.cloudUrl)
-        if (typeof cfg.cloudKey === 'string') setCloudKey(cfg.cloudKey)
-        const endpoint = effectiveCloudEndpoint(cfg)
-        const on = endpoint !== null
-        setCloudOn(on)
-        setCloudSrc(endpoint?.source ?? null)
-        setHostedReady(hostedCloudEndpoint() !== null)
-        setKnownDevices(cfg.devices ?? [])
-        if (on) {
-          try {
-            const client = makeCloudClient(cfg)
-            setSessionEmail(await client.sessionEmail())
-            setSignedIn(await client.isSignedIn())
-            // Devices seen in cloud snapshots (read-only server truth).
-            const seen = new Map<string, string>()
-            for (const p of await client.listProjects()) {
-              const snap = await client.latestSnapshot(p.id).catch(() => null)
-              if (snap?.deviceName !== null && snap?.deviceName !== undefined) {
-                const prev = seen.get(snap.deviceName)
-                if (prev === undefined || snap.createdAt > prev) seen.set(snap.deviceName, snap.createdAt)
-              }
-            }
-            setCloudDevices([...seen.entries()].map(([name, lastPush]) => ({ name, lastPush })))
-          } catch {
-            setSessionEmail(null)
-            setSignedIn(false)
-          }
-        }
+      .then((name) => {
+        if (!cancelled) setDeviceName(name)
       })
       .catch(() => {})
-    vault
-      .listProjects()
-      .then(setProjects)
+    loadConfig()
+      .then((cfg) => {
+        if (cancelled) return
+        setHasEncryption(cfg.cryptoSalt !== undefined)
+        setUnlocked(isUnlocked())
+      })
       .catch(() => {})
-  }, [vault])
+    ;(async () => {
+      try {
+        const rows = await vault.listProjects()
+        if (cancelled) return
+        setProjects(rows)
+        try {
+          const next = await computeStats(rows)
+          if (!cancelled) setStats(next)
+        } catch (err) {
+          if (!cancelled) setStatsError(err instanceof Error ? err.message : 'Could not read vault stats')
+        }
+      } catch {
+        // The project card below already surfaces an empty list.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [vault, computeStats])
 
   async function setupEncryption(): Promise<void> {
     try {
@@ -125,158 +171,154 @@ export function SettingsScreen(): React.JSX.Element {
     toast('Locked.')
   }
 
-  async function forgetDevice(name: string): Promise<void> {
-    try {
-      const cfg = await loadConfig()
-      await saveConfig({ devices: (cfg.devices ?? []).filter((d) => d.name !== name) })
-      setKnownDevices((all) => all.filter((d) => d.name !== name))
-      toast(`Forgot ${name} locally. (Cloud snapshots keep their device label.)`)
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Forget failed', 'error')
-    }
-  }
-
-  async function saveCloud(): Promise<void> {
-    try {
-      const cfg = await saveConfig({ cloudUrl: cloudUrl.trim(), cloudKey: cloudKey.trim() })
-      const endpoint = effectiveCloudEndpoint(cfg)
-      setCloudOn(endpoint !== null)
-      setCloudSrc(endpoint?.source ?? null)
-      toast('Custom backend saved. Server sees ciphertext only.')
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Save failed', 'error')
-    }
-  }
-
-  async function useHosted(): Promise<void> {
-    try {
-      const cfg = await clearCustomCloud()
-      setCloudUrl('')
-      setCloudKey('')
-      const endpoint = effectiveCloudEndpoint(cfg)
-      setCloudOn(endpoint !== null)
-      setCloudSrc(endpoint?.source ?? null)
-      toast('Switched back to the managed cloud.')
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Switch failed', 'error')
-    }
-  }
-
-  async function testConnection(): Promise<void> {
-    setTesting(true)
-    try {
-      const cfg = await loadConfig()
-      const client = makeCloudClient(cfg)
-      const ok = await client.isSignedIn().catch(() => false)
-      const projects = await client.listProjects()
-      if (ok) {
-        const email = await client.sessionEmail().catch(() => null)
-        toast(
-          email !== null
-            ? `Connected — signed in as ${email}, ${projects.length} cloud project(s).`
-            : `Connected — signed in with GitHub, ${projects.length} cloud project(s).`,
-        )
-      } else {
-        toast('Reachable, but not signed in — use Sign in with GitHub below.', 'error')
-      }
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Connection failed', 'error')
-    } finally {
-      setTesting(false)
-    }
-  }
-
-  async function signOut(): Promise<void> {
-    try {
-      const client = makeCloudClient(await loadConfig())
-      await client.signOut()
-      setSessionEmail(null)
-      setSignedIn(false)
-      toast('Signed out.')
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Sign-out failed', 'error')
-    }
-  }
   async function saveDeviceName(): Promise<void> {
     try {
-      const cfg = await configRead().catch((): Record<string, unknown> => ({}))
-      cfg['deviceName'] = deviceName
-      await configWrite(cfg)
+      await saveConfig({ deviceName })
       toast('Device name saved.')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Save failed', 'error')
     }
   }
 
-  async function exportAll(): Promise<void> {
-    // Plaintext backup per project, all .env* files. Export never touches cloud state.
+  async function refreshProjectsAndStats(): Promise<ProjectRecord[]> {
+    const rows = await vault.listProjects()
+    setProjects(rows)
     try {
-      for (const p of projects) {
-        const sep = p.folderPath.includes('/') ? '/' : '\\'
-        const base = p.folderPath.replace(/[\\/]+$/, '')
-        let names = ['.env']
-        try {
-          const found = await listEnvFiles(p.folderPath)
-          if (found.length > 0) names = found
-        } catch {
-          // fall back to .env
+      setStats(await computeStats(rows))
+    } catch (err) {
+      setStatsError(err instanceof Error ? err.message : 'Could not read vault stats')
+    }
+    return rows
+  }
+
+  async function exportAllBundles(): Promise<void> {
+    if (!isUnlocked()) {
+      toast('Unlock encryption to export encrypted bundles.', 'error')
+      return
+    }
+    if (projects.length === 0) return
+    setBusy(true)
+    try {
+      const directory = await pickProjectFolder()
+      if (directory === null) return
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      let exported = 0
+      let skipped = 0
+      let failed = 0
+      for (const project of projects) {
+        const names = trackableEnvFiles(
+          await listEnvFiles(project.folderPath).catch(() => [] as string[]),
+        )
+        if (names.length === 0) {
+          skipped += 1
+          continue
         }
+        const contents: Record<string, string> = {}
         for (const name of names) {
           try {
-            const content = await readEnvFile(`${base}${sep}${name}`)
-            downloadFile(`${p.displayName}.${name}.export`, content)
+            contents[name] = await readEnvFile(joinPath(project.folderPath, name))
           } catch {
-            toast(`Skipped ${p.displayName}/${name} — not readable.`, 'error')
+            // Missing/unreadable files are skipped; the rest still export.
           }
         }
+        if (Object.keys(contents).length === 0) {
+          skipped += 1
+          continue
+        }
+        try {
+          const bundle = await buildBundle({
+            identity: project.identity,
+            displayName: project.displayName,
+            files: contents,
+          })
+          const name = `${safeName(project.displayName)}-${safeName(project.identity)}-${stamp}.envmgr`
+          await writeEnvFile(joinPath(directory, name), serializeBundle(bundle))
+          exported += 1
+        } catch {
+          failed += 1
+        }
       }
-      toast('Export downloaded per project.')
+      const parts = [`Exported ${exported} bundle${exported === 1 ? '' : 's'}`]
+      if (skipped > 0) parts.push(`skipped ${skipped}`)
+      if (failed > 0) parts.push(`failed ${failed}`)
+      toast(parts.join(' · '), failed > 0 ? 'error' : 'info')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Export failed', 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
-  async function removeProject(p: ProjectRecord): Promise<void> {
-    if (!window.confirm(`Unlink "${p.displayName}"? Your .env files stay on disk.`)) return
+  async function pickBundleForImport(): Promise<void> {
+    setImportError('')
+    setBusy(true)
     try {
-      await vault.removeProject(p.id)
-      setProjects((all) => all.filter((x) => x.id !== p.id))
+      const path = await pickOpenFile(BUNDLE_FILTERS)
+      if (path === null) return
+      const bundle = parseBundle(await readEnvFile(path))
+      const rows = await vault.listProjects()
+      setProjects(rows)
+      const match = rows.find((project) => project.identity === bundle.project.identity)
+      if (match !== undefined) {
+        navigate(`/project/${encodeURIComponent(match.id)}`, { state: { bundlePath: path } })
+        return
+      }
+      setPendingImport({ bundle, path })
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Bundle import failed')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function addProjectForBundle(): Promise<void> {
+    if (pendingImport === null) return
+    setImportError('')
+    setBusy(true)
+    try {
+      const folder = await pickProjectFolder()
+      if (folder === null) return
+      const rows = await vault.listProjects()
+      const byFolder = rows.find((project) => folderKey(project.folderPath) === folderKey(folder))
+      if (byFolder !== undefined && byFolder.identity !== pendingImport.bundle.project.identity) {
+        throw new Error(
+          `That folder is already linked to ${byFolder.identity}. Unlink it first, or choose another folder.`,
+        )
+      }
+      const existing =
+        byFolder ??
+        rows.find((project) => project.identity === pendingImport.bundle.project.identity) ??
+        (await vault.addProject({
+          identity: pendingImport.bundle.project.identity,
+          displayName: pendingImport.bundle.project.displayName,
+          folderPath: folder,
+        }))
+      if (isTauri()) {
+        const links = await linksRead().catch((): Record<string, string> => ({}))
+        links[existing.folderPath] = existing.identity
+        await linksWrite(links).catch(() => {})
+      }
+      const path = pendingImport.path
+      setPendingImport(null)
+      await refreshProjectsAndStats()
+      navigate(`/project/${encodeURIComponent(existing.id)}`, { state: { bundlePath: path } })
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : 'Could not add the project')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function removeProject(project: ProjectRecord): Promise<void> {
+    if (!window.confirm(`Unlink "${project.displayName}"? Your .env files stay on disk.`)) return
+    try {
+      await vault.removeProject(project.id)
+      await refreshProjectsAndStats()
       toast('Project unlinked — .env files left intact.')
     } catch (err) {
       toast(err instanceof Error ? err.message : 'Remove failed', 'error')
     }
   }
-
-  const customBackendFields = (
-    <>
-      <Input
-        aria-label="Supabase URL"
-        placeholder="https://xyz.supabase.co"
-        autoComplete="off"
-        spellCheck={false}
-        value={cloudUrl}
-        onChange={(e) => setCloudUrl(e.target.value)}
-      />
-      <Input
-        aria-label="Supabase anon key"
-        placeholder="anon key"
-        autoComplete="off"
-        spellCheck={false}
-        value={cloudKey}
-        onChange={(e) => setCloudKey(e.target.value)}
-      />
-      <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="secondary" onClick={saveCloud} disabled={!isTauri()}>
-          Save custom backend
-        </Button>
-        {cloudSrc === 'custom' && hostedReady && (
-          <Button type="button" variant="outline" onClick={useHosted}>
-            Use managed cloud instead
-          </Button>
-        )}
-      </div>
-    </>
-  )
 
   return (
     <div className="flex flex-col gap-4">
@@ -285,7 +327,10 @@ export function SettingsScreen(): React.JSX.Element {
       <Card>
         <CardHeader>
           <CardTitle>Device</CardTitle>
-          <CardDescription>From your OS hostname — override it if you like. Shown alongside cloud snapshots.</CardDescription>
+          <CardDescription>
+            From your OS hostname — override it if you like. Used as the label in encrypted bundle
+            metadata, not as a sync identity.
+          </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2 sm:flex-row">
           <Input
@@ -303,10 +348,45 @@ export function SettingsScreen(): React.JSX.Element {
 
       <Card>
         <CardHeader>
+          <CardTitle>Appearance</CardTitle>
+          <CardDescription>
+            Follows your OS theme when set to System. The choice is saved on this device and
+            applied before the first paint.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <div className="flex flex-col gap-2 sm:flex-row" role="group" aria-label="Theme">
+            {themeOptions.map(({ value, label, icon: Icon }) => {
+              const active = preference === value
+              return (
+                <Button
+                  key={value}
+                  type="button"
+                  variant={active ? 'secondary' : 'outline'}
+                  aria-pressed={active}
+                  onClick={() => setPreference(value)}
+                  className="w-full sm:w-auto"
+                >
+                  <Icon aria-hidden />
+                  {label}
+                </Button>
+              )
+            })}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            Currently using the {resolved} theme
+            {preference === 'system' ? ' (following your OS).' : '.'}
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Encryption</CardTitle>
           <CardDescription>
-            Zero-knowledge: passphrase → Argon2id → master key → per-project keys. The passphrase
-            and keys never leave this device.
+            Zero-knowledge: passphrase → Argon2id → master key → portable per-file keys. Your
+            passphrase is entered at every launch and never stored — not in a system credential
+            store, not on disk.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
@@ -350,7 +430,7 @@ export function SettingsScreen(): React.JSX.Element {
           {hasEncryption && recoveryCode === null && (
             <div className="flex flex-wrap items-center gap-2">
               <p className="mr-auto text-sm text-muted-foreground">
-                {unlocked ? 'Unlocked — keys in memory.' : 'Locked.'}
+                {unlocked ? 'Unlocked — keys in memory for this session.' : 'Locked.'}
               </p>
               {unlocked && (
                 <Button type="button" variant="outline" onClick={lockNow}>
@@ -364,128 +444,148 @@ export function SettingsScreen(): React.JSX.Element {
 
       <Card>
         <CardHeader>
-          <CardTitle>Cloud sync</CardTitle>
+          <CardTitle>Vault</CardTitle>
           <CardDescription>
-            {cloudSrc === 'hosted' &&
-              'Managed cloud is built in — sign in below and Push. The server sees ciphertext only.'}
-            {cloudSrc === 'custom' && 'Using your own Supabase project. The server sees ciphertext only.'}
-            {cloudSrc === null &&
-              'This build has no cloud backend. Point at your own Supabase project below, or stay local-only (the default, no account needed).'}{' '}
-            Per-project <code>local-only</code> skips cloud entirely.
+            Local encrypted snapshots only — no account, no server, no network calls.
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge variant={cloudOn ? 'success' : 'secondary'}>
-              {cloudSrc === 'hosted' ? 'managed cloud' : cloudSrc === 'custom' ? 'self-hosted' : 'local-only'}
-            </Badge>
-            {cloudOn && (
-              <Button type="button" variant="outline" onClick={testConnection} disabled={!isTauri() || testing}>
-                {testing ? 'Testing…' : 'Test connection'}
-              </Button>
-            )}
-          </div>
-          {cloudSrc !== 'hosted' && customBackendFields}
-          {cloudSrc === 'hosted' && (
-            <details className="rounded-md border p-3">
-              <summary className="min-h-[44px] cursor-pointer text-sm font-medium">
-                Use your own Supabase project instead
-              </summary>
-              <div className="mt-2 flex flex-col gap-3">{customBackendFields}</div>
-            </details>
-          )}
-          {cloudOn && (
-            <>
-              {signedIn ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="mr-auto text-sm">
-                    Signed in{sessionEmail !== null ? <> as <code>{sessionEmail}</code></> : ' with GitHub'}
-                  </p>
-                  <Button type="button" variant="outline" onClick={signOut}>
-                    Sign out
-                  </Button>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  <GitHubSignInButton
-                    onSignedIn={(s) => {
-                      setSessionEmail(s.email)
-                      setSignedIn(s.signedIn)
-                    }}
-                  />
-                  {!isTauri() && (
-                    <p className="text-sm text-muted-foreground">Sign-in needs the desktop app.</p>
-                  )}
-                </div>
-              )}
-            </>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Devices</CardTitle>
-          <CardDescription>
-            This device plus every device seen pushing to your cloud snapshots.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-2">
-          <p className="text-sm">
-            This device: <code>{deviceName !== '' ? deviceName : '(unnamed)'}</code>
+        <CardContent className="flex flex-col gap-2 text-sm">
+          <p className="min-w-0 break-all">
+            <code>~/.env-manager/vault.db</code>
           </p>
-          {knownDevices.length === 0 && cloudDevices.length === 0 && (
-            <p className="text-sm text-muted-foreground">No other devices seen yet.</p>
+          <p>
+            {!isTauri()
+              ? 'Vault stats appear in the desktop app.'
+              : stats === null
+                ? 'Reading vault…'
+                : `${stats.snapshots.toLocaleString()} snapshots · ${formatBytes(stats.bytes)}`}
+          </p>
+          <p>
+            Last backup:{' '}
+            {!isTauri()
+              ? '—'
+              : stats?.lastBackup
+                ? new Date(stats.lastBackup).toLocaleString()
+                : 'none yet'}
+          </p>
+          <p className="text-muted-foreground">
+            Rows hold ciphertext envelopes plus a local plaintext hash used only for conflict
+            detection. Passphrases and keys are never stored.
+          </p>
+          {statsError !== '' && (
+            <p role="alert" className="text-destructive">
+              {statsError}
+            </p>
           )}
-          {knownDevices.map((d) => (
-            <div key={d.name} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
-              <span className="mr-auto min-w-0 truncate text-sm">
-                <code>{d.name}</code> <span className="text-muted-foreground">· last push {d.lastSeen}</span>
-              </span>
-              <Button type="button" variant="outline" onClick={() => forgetDevice(d.name)}>
-                Forget
-              </Button>
-            </div>
-          ))}
-          {cloudDevices
-            .filter((d) => !knownDevices.some((k) => k.name === d.name))
-            .map((d) => (
-              <div key={d.name} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
-                <span className="mr-auto min-w-0 truncate text-sm">
-                  <code>{d.name}</code> <span className="text-muted-foreground">· cloud snapshot {d.lastPush}</span>
-                </span>
-              </div>
-            ))}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Export / Remove</CardTitle>
+          <CardTitle>Import / export</CardTitle>
           <CardDescription>
-            Export gives you plaintext backups per project. Remove unlinks the app — your{' '}
-            <code>.env</code> files stay intact.
+            Move encrypted <code>.envmgr</code> bundles by hand — USB drive, external disk,
+            anywhere. There is no server in the loop.
           </CardDescription>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
-          <div>
-            <Button type="button" variant="secondary" onClick={exportAll} disabled={!isTauri() || projects.length === 0}>
-              Export all backups
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={exportAllBundles}
+              disabled={!isTauri() || !unlocked || projects.length === 0 || busy}
+              className="w-full sm:w-auto"
+            >
+              Export all bundles…
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={pickBundleForImport}
+              disabled={!isTauri() || busy}
+              className="w-full sm:w-auto"
+            >
+              Import bundle…
             </Button>
           </div>
-          {projects.map((p) => (
-            <div key={p.id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
-              <Link to={`/project/${encodeURIComponent(p.id)}`} className="mr-auto min-w-0 truncate text-sm font-medium underline-offset-4 hover:underline">
-                {p.displayName}
+          {!unlocked && (
+            <p className="text-sm text-muted-foreground">
+              Unlock encryption to export bundles. Importing an encrypted bundle routes to its
+              project, where you can enter the bundle passphrase.
+            </p>
+          )}
+          {importError !== '' && pendingImport === null && (
+            <p role="alert" className="text-sm text-destructive">
+              {importError}
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      {pendingImport !== null && (
+        <Card>
+          <CardHeader>
+            <CardTitle>No matching project</CardTitle>
+            <CardDescription>
+              This bundle is for <code>{pendingImport.bundle.project.identity}</code>. Choose the
+              folder for this project on this device, then import it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button type="button" onClick={addProjectForBundle} disabled={busy}>
+                {busy ? 'Adding…' : 'Choose folder & add'}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setPendingImport(null)
+                  setImportError('')
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+            {importError !== '' && (
+              <p role="alert" className="text-sm text-destructive">
+                {importError}
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Projects / Remove</CardTitle>
+          <CardDescription>
+            Remove unlinks the app from a project. Your <code>.env</code> files stay intact on
+            disk, and nothing is written into your repos.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          {projects.map((project) => (
+            <div key={project.id} className="flex min-w-0 flex-wrap items-center gap-2 rounded-md border p-3">
+              <Link
+                to={`/project/${encodeURIComponent(project.id)}`}
+                className="mr-auto min-w-0 truncate text-sm font-medium underline-offset-4 hover:underline"
+                title={project.folderPath}
+              >
+                {project.displayName}
               </Link>
-              <Button type="button" variant="outline" onClick={() => removeProject(p)}>
+              <Button type="button" variant="outline" onClick={() => removeProject(project)}>
                 Remove
               </Button>
             </div>
           ))}
+          {projects.length === 0 && (
+            <p className="text-sm text-muted-foreground">No projects linked yet.</p>
+          )}
           {!isTauri() && (
             <p className="text-sm text-muted-foreground">
-              Open the desktop app (<code>npm run tauri dev</code>) to manage projects.
+              Open the desktop app (<code>pnpm tauri dev</code>) to manage projects.
             </p>
           )}
         </CardContent>

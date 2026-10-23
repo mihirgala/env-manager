@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { MemoryCloudClient } from './cloud'
 import { lock, setupPassphrase } from './crypto'
 import { sha256Hex } from './hash'
+import { createMemoryStore } from './store'
 import {
-  applyPull,
-  planPull,
+  applyImportedText,
+  applyRestore,
+  backupToVault,
+  planRestore,
   previewDiff,
   projectStatus,
-  pushProject,
   type FileIO,
+  type FileTarget,
   type SyncContext,
 } from './sync'
 
@@ -33,101 +35,113 @@ function memoryIO(files: Map<string, string>): FileIO & { backups: string[] } {
   }
 }
 
+const target: FileTarget = {
+  projectId: 'p1',
+  identity: 'github.com/a/b',
+  filePath: '/p/.env',
+  fileName: '.env',
+}
+
 afterEach(() => lock())
 
-describe('sync engine (memory cloud + memory fs)', () => {
-  it('push stores ciphertext only; server never sees plaintext', async () => {
+describe('snapshot engine (memory store + memory fs)', () => {
+  it('backup stores ciphertext only; the store never sees plaintext', async () => {
     await setupPassphrase('sync-passphrase-1')
-    const cloud = new MemoryCloudClient()
+    const store = createMemoryStore()
     const files = new Map([['/p/.env', 'API_KEY=example-secret\n']])
-    const io = memoryIO(files)
-    const ctx: SyncContext = { cloud, io, lastSyncedSha: null }
-    const { sha256 } = await pushProject(ctx, {
-      identity: 'github.com/a/b',
-      displayName: 'b',
-      projectId: 'proj-a',
-      filePath: '/p/.env',
-      deviceName: 'laptop-a',
-    })
+    const ctx: SyncContext = { store, io: memoryIO(files) }
+
+    const { sha256 } = await backupToVault(ctx, target)
+
     expect(sha256).toBe(await sha256Hex('API_KEY=example-secret\n'))
-    const stored = cloud.storedSnapshots('cloud-1')
-    expect(stored).toHaveLength(1)
-    const blob = JSON.stringify(stored[0])
+    expect(store.rows).toHaveLength(1)
+    const blob = JSON.stringify(store.rows)
     expect(blob).not.toContain('example-secret')
-    expect(stored[0]?.plaintextSha256).toBe(sha256)
+    expect(blob).toContain('ciphertext')
+    expect(store.rows[0]?.plaintextSha256).toBe(sha256)
+    expect(store.rows[0]?.source).toBe('local')
   })
 
-  it('laptop B pulls what laptop A pushed', async () => {
+  it('changed file → planRestore diff → applyRestore backs up before writing', async () => {
     await setupPassphrase('sync-passphrase-2')
-    const cloud = new MemoryCloudClient()
-    const ioA = memoryIO(new Map([['/a/.env', 'K=one\n']]))
-    await pushProject(
-      { cloud, io: ioA, lastSyncedSha: null },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/a/.env', deviceName: 'a' },
-    )
-    const ioB = memoryIO(new Map())
-    const plan = await planPull(
-      { cloud, io: ioB, lastSyncedSha: null },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
-    )
-    expect(plan?.diff.added).toEqual(['K'])
-    const applied = await applyPull(
-      { cloud, io: ioB, lastSyncedSha: null },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
-    )
-    expect(applied.backupPath).toBeNull()
-    expect(ioB.backups).toHaveLength(0)
-    // round-trip through the real parser survived
-    expect((await ioB.readFile('/b/.env'))).toBe('K=one\n')
-  })
-
-  it('conflicting pull backs up before overwrite', async () => {
-    await setupPassphrase('sync-passphrase-3')
-    const cloud = new MemoryCloudClient()
-    const ioA = memoryIO(new Map([['/a/.env', 'K=cloud\n']]))
-    const pushed = await pushProject(
-      { cloud, io: ioA, lastSyncedSha: null },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/a/.env', deviceName: 'a' },
-    )
-    // Local edits after the last sync → conflict on pull.
-    const ioB = memoryIO(new Map([['/b/.env', 'K=local-edit\n']]))
-    const plan = await planPull(
-      { cloud, io: ioB, lastSyncedSha: pushed.sha256 },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
-    )
-    expect(plan?.conflict).toBe(true)
-    expect(plan?.diff.changed).toEqual(['K'])
-    const applied = await applyPull(
-      { cloud, io: ioB, lastSyncedSha: pushed.sha256 },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
-    )
-    expect(applied.backupPath).not.toBeNull()
-    expect(await ioB.readFile(applied.backupPath as string)).toBe('K=local-edit\n')
-    expect(await ioB.readFile('/b/.env')).toBe('K=cloud\n')
-  })
-
-  it('status transitions clean → ahead → behind → diverged', async () => {
-    await setupPassphrase('sync-passphrase-4')
-    const cloud = new MemoryCloudClient()
-    const files = new Map([['/p/.env', 'K=1\n']])
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=stored\n']])
     const io = memoryIO(files)
-    const base = { identity: 'github.com/a/b', filePath: '/p/.env' } as const
-    expect(await projectStatus({ cloud, io, lastSyncedSha: null }, { ...base, localOnly: true })).toBe('local-only')
-    expect(await projectStatus({ cloud, io, lastSyncedSha: null }, { ...base, localOnly: false })).toBe('clean')
-    const { sha256 } = await pushProject(
-      { cloud, io, lastSyncedSha: null },
-      { ...base, identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', deviceName: 'a' },
-    )
-    // Local edit after push → ahead.
-    files.set('/p/.env', 'K=2\n')
-    expect(await projectStatus({ cloud, io, lastSyncedSha: sha256 }, { ...base, localOnly: false })).toBe('ahead')
-    // Cloud moves on (another device) while local stays at old sync → behind.
-    files.set('/p/.env', 'K=1\n')
-    await pushProject(
-      { cloud, io: memoryIO(new Map([['/x/.env', 'K=3\n']])), lastSyncedSha: sha256 },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/x/.env', deviceName: 'b' },
-    )
-    expect(await projectStatus({ cloud, io, lastSyncedSha: sha256 }, { ...base, localOnly: false })).toBe('behind')
+    const ctx: SyncContext = { store, io }
+
+    const pushed = await backupToVault(ctx, target)
+    expect(await projectStatus(ctx, target)).toBe('backed-up')
+
+    files.set('/p/.env', 'K=local-edit\n')
+    expect(await projectStatus(ctx, target)).toBe('changed')
+
+    const plan = await planRestore(ctx, target)
+    expect(plan?.diff.changed).toEqual(['K'])
+    expect(plan?.conflict).toBe(true)
+    expect(plan?.sha256).toBe(pushed.sha256)
+    expect(plan?.source).toBe('local')
+
+    const applied = await applyRestore(ctx, target)
+    expect(applied.backupPath).not.toBeNull()
+    expect(await io.readFile(applied.backupPath as string)).toBe('K=local-edit\n')
+    expect(await io.readFile('/p/.env')).toBe('K=stored\n')
+    expect(await projectStatus(ctx, target)).toBe('backed-up')
+    // The restore itself records a fresh local snapshot.
+    expect(store.rows).toHaveLength(2)
+    expect(store.rows[1]?.plaintextSha256).toBe(pushed.sha256)
+  })
+
+  it('identical re-backup keeps status backed-up and appends a row', async () => {
+    await setupPassphrase('sync-passphrase-3')
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=same\n']])
+    const ctx: SyncContext = { store, io: memoryIO(files) }
+
+    await backupToVault(ctx, target)
+    await backupToVault(ctx, target)
+
+    expect(await projectStatus(ctx, target)).toBe('backed-up')
+    expect(store.rows).toHaveLength(2)
+  })
+
+  it('imported text backs up the old file first and stores source import', async () => {
+    await setupPassphrase('sync-passphrase-4a')
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=old\n']])
+    const io = memoryIO(files)
+    const ctx: SyncContext = { store, io }
+
+    const applied = await applyImportedText(ctx, { ...target, text: 'K=imported\n' })
+
+    expect(applied.backupPath).not.toBeNull()
+    expect(await io.readFile(applied.backupPath as string)).toBe('K=old\n')
+    expect(files.get('/p/.env')).toBe('K=imported\n')
+    expect(store.rows[0]?.source).toBe('import')
+    expect(JSON.stringify(store.rows)).not.toContain('imported')
+    expect(await projectStatus(ctx, target)).toBe('backed-up')
+  })
+
+  it('missing snapshot → not-backed-up; restore is a no-op', async () => {
+    await setupPassphrase('sync-passphrase-4')
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=one\n']])
+    const ctx: SyncContext = { store, io: memoryIO(files) }
+
+    expect(await projectStatus(ctx, target)).toBe('not-backed-up')
+    expect(await planRestore(ctx, target)).toBeNull()
+    await expect(applyRestore(ctx, target)).rejects.toThrow(/no stored snapshot/)
+    expect(files.get('/p/.env')).toBe('K=one\n')
+  })
+
+  it('locked → locked; no store or disk reads needed', async () => {
+    await setupPassphrase('sync-passphrase-5')
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=one\n']])
+    const ctx: SyncContext = { store, io: memoryIO(files) }
+    await backupToVault(ctx, target)
+
+    lock()
+    expect(await projectStatus(ctx, target)).toBe('locked')
   })
 
   it('previewDiff classifies added/removed/changed', () => {

@@ -4,7 +4,24 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>tmp-vite</title>
+    <meta name="color-scheme" content="light dark" />
+    <title>env-manager</title>
+    <script>
+      (function () {
+        try {
+          var preference = localStorage.getItem('env-manager.theme')
+          if (preference !== 'light' && preference !== 'dark') preference = 'system'
+          var dark =
+            preference === 'dark' ||
+            (preference === 'system' &&
+              window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+          if (dark) document.documentElement.classList.add('dark')
+        } catch (error) {
+          // Storage can be disabled (privacy mode); the app will fall back to system.
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

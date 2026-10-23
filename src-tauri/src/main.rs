@@ -1,17 +1,18 @@
 // Thin backend by design: filesystem read/write, `git remote` lookup, local
 // SQLite vault, `links.json` / `config.json` files, file stats for the
-// watcher poll, `.env` backups, OS keychain hold, OS device name, and opening
-// URLs in the system browser. No crypto, dotenv parsing, sync logic, or
-// Supabase calls here — those live in `src/lib` (TypeScript) so they stay
-// testable without Rust. See `docs/ARCHITECTURE.md`.
+// watcher poll, `.env` backups, and the OS device name. No crypto, dotenv
+// parsing, or sync logic here — those live in `src/lib` (TypeScript) so they
+// stay testable without Rust. See `docs/ARCHITECTURE.md`.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 // ---------------------------------------------------------------------------
 // Paths (~/.env-manager/)
@@ -50,26 +51,72 @@ CREATE TABLE IF NOT EXISTS projects (
   identity TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
   folder_path TEXT NOT NULL,
-  local_only INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS env_sets (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  file_name TEXT NOT NULL,
-  sha256 TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL,
-  UNIQUE (project_id, file_name)
+CREATE TABLE IF NOT EXISTS snapshots (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  file_name        TEXT NOT NULL,
+  envelope         TEXT NOT NULL,
+  plaintext_sha256 TEXT NOT NULL,
+  source           TEXT NOT NULL,
+  created_at       TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS snapshots_lookup
+  ON snapshots (project_id, file_name, created_at DESC);
 ";
+
+/// Rows kept per `(project_id, file_name)` — recent restore points only.
+const SNAPSHOT_RETENTION: i64 = 20;
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    Ok(count > 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    let mut rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    for name in rows.by_ref() {
+        if name.map_err(|e| format!("vault schema check: {e}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 fn db() -> Result<Connection, String> {
     let path = vault_db()?;
     let conn = Connection::open(&path).map_err(|e| format!("open vault.db: {e}"))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("vault pragma: {e}"))?;
-    conn.execute_batch(SCHEMA)
-        .map_err(|e| format!("vault schema: {e}"))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| format!("vault version: {e}"))?;
+    if version < 1 {
+        // Existing P1 installs carry `local_only` + `env_sets` (row ids and
+        // sha256 only — no secrets). Drop both; snapshots replace them.
+        if table_exists(&conn, "projects")? && column_exists(&conn, "projects", "local_only")? {
+            conn.execute_batch("ALTER TABLE projects DROP COLUMN local_only;")
+                .map_err(|e| format!("vault migration (local_only): {e}"))?;
+        }
+        conn.execute_batch("DROP TABLE IF EXISTS env_sets;")
+            .map_err(|e| format!("vault migration (env_sets): {e}"))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| format!("vault schema: {e}"))?;
+        conn.execute_batch("PRAGMA user_version = 1;")
+            .map_err(|e| format!("vault version: {e}"))?;
+    }
     Ok(conn)
 }
 
@@ -88,18 +135,20 @@ struct ProjectRow {
     identity: String,
     display_name: String,
     folder_path: String,
-    local_only: bool,
     created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EnvSetRow {
+struct SnapshotRow {
     id: String,
     project_id: String,
     file_name: String,
-    sha256: String,
-    updated_at: String,
+    /// Opaque envelope JSON. Rust never parses, hashes, or decrypts it.
+    envelope: String,
+    plaintext_sha256: String,
+    source: String,
+    created_at: String,
 }
 
 fn new_id() -> String {
@@ -128,15 +177,29 @@ fn new_id() -> String {
     )
 }
 
+fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    Ok(ProjectRow {
+        id: r.get(0)?,
+        identity: r.get(1)?,
+        display_name: r.get(2)?,
+        folder_path: r.get(3)?,
+        created_at: r.get(4)?,
+    })
+}
+
+const PROJECT_COLUMNS: &str = "id, identity, display_name, folder_path, created_at";
+
 #[tauri::command]
 fn project_add(identity: String, display_name: String, folder_path: String) -> Result<ProjectRow, String> {
     let conn = db()?;
     let id = new_id();
     let created = now_iso();
+    // Duplicate identities keep their original folder: re-pointing a link
+    // silently would move snapshots to the wrong repo (scan UI explains it).
     conn.execute(
-        "INSERT INTO projects (id, identity, display_name, folder_path, local_only, created_at)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5)
-         ON CONFLICT(identity) DO UPDATE SET folder_path = excluded.folder_path",
+        "INSERT INTO projects (id, identity, display_name, folder_path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(identity) DO NOTHING",
         params![id, identity, display_name, folder_path, created],
     )
     .map_err(|e| format!("project_add: {e}"))?;
@@ -147,19 +210,10 @@ fn project_add(identity: String, display_name: String, folder_path: String) -> R
 fn project_list() -> Result<Vec<ProjectRow>, String> {
     let conn = db()?;
     let mut stmt = conn
-        .prepare("SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects ORDER BY display_name")
+        .prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY display_name"))
         .map_err(|e| format!("project_list: {e}"))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(ProjectRow {
-                id: r.get(0)?,
-                identity: r.get(1)?,
-                display_name: r.get(2)?,
-                folder_path: r.get(3)?,
-                local_only: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-            })
-        })
+        .query_map([], project_from_row)
         .map_err(|e| format!("project_list: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("project_list: {e}"))
 }
@@ -167,18 +221,9 @@ fn project_list() -> Result<Vec<ProjectRow>, String> {
 fn project_get_by_identity(identity: String) -> Result<ProjectRow, String> {
     let conn = db()?;
     conn.query_row(
-        "SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects WHERE identity = ?1",
+        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE identity = ?1"),
         params![identity],
-        |r| {
-            Ok(ProjectRow {
-                id: r.get(0)?,
-                identity: r.get(1)?,
-                display_name: r.get(2)?,
-                folder_path: r.get(3)?,
-                local_only: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-            })
-        },
+        project_from_row,
     )
     .map_err(|e| format!("project not found: {e}"))
 }
@@ -187,19 +232,11 @@ fn project_get_by_identity(identity: String) -> Result<ProjectRow, String> {
 fn project_get(id: String) -> Result<Option<ProjectRow>, String> {
     let conn = db()?;
     let mut stmt = conn
-        .prepare("SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects WHERE id = ?1")
+        .prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"))
         .map_err(|e| format!("project_get: {e}"))?;
-    let mut rows = stmt.query_map(params![id], |r| {
-        Ok(ProjectRow {
-            id: r.get(0)?,
-            identity: r.get(1)?,
-            display_name: r.get(2)?,
-            folder_path: r.get(3)?,
-            local_only: r.get::<_, i64>(4)? != 0,
-            created_at: r.get(5)?,
-        })
-    })
-    .map_err(|e| format!("project_get: {e}"))?;
+    let mut rows = stmt
+        .query_map(params![id], project_from_row)
+        .map_err(|e| format!("project_get: {e}"))?;
     match rows.next() {
         Some(r) => r.map(Some).map_err(|e| format!("project_get: {e}")),
         None => Ok(None),
@@ -211,70 +248,297 @@ fn project_get(id: String) -> Result<Option<ProjectRow>, String> {
 #[tauri::command]
 fn project_remove(id: String) -> Result<(), String> {
     let conn = db()?;
-    conn.execute("DELETE FROM env_sets WHERE project_id = ?1", params![id])
+    // Explicit delete keeps the vault tidy even if an old connection ran
+    // without `PRAGMA foreign_keys = ON`.
+    conn.execute("DELETE FROM snapshots WHERE project_id = ?1", params![id])
         .map_err(|e| format!("project_remove: {e}"))?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| format!("project_remove: {e}"))?;
     Ok(())
 }
 
+const SNAPSHOT_COLUMNS: &str =
+    "id, project_id, file_name, envelope, plaintext_sha256, source, created_at";
+
+fn snapshot_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRow> {
+    Ok(SnapshotRow {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        file_name: r.get(2)?,
+        envelope: r.get(3)?,
+        plaintext_sha256: r.get(4)?,
+        source: r.get(5)?,
+        created_at: r.get(6)?,
+    })
+}
+
+/// Append one encrypted snapshot, keeping only the newest 20 per file.
 #[tauri::command]
-fn project_set_local_only(id: String, local_only: bool) -> Result<(), String> {
+fn snapshot_put(
+    project_id: String,
+    file_name: String,
+    envelope: String,
+    plaintext_sha256: String,
+    source: String,
+) -> Result<SnapshotRow, String> {
     let conn = db()?;
+    let id = new_id();
+    let created = now_iso();
     conn.execute(
-        "UPDATE projects SET local_only = ?1 WHERE id = ?2",
-        params![if local_only { 1 } else { 0 }, id],
+        "INSERT INTO snapshots (id, project_id, file_name, envelope, plaintext_sha256, source, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, project_id, file_name, envelope, plaintext_sha256, source, created],
     )
-    .map_err(|e| format!("project_set_local_only: {e}"))?;
+    .map_err(|e| format!("snapshot_put: {e}"))?;
+    conn.execute(
+        "DELETE FROM snapshots
+         WHERE project_id = ?1 AND file_name = ?2
+           AND id NOT IN (
+             SELECT id FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?3
+           )",
+        params![project_id, file_name, SNAPSHOT_RETENTION],
+    )
+    .map_err(|e| format!("snapshot_put retention: {e}"))?;
+    conn.query_row(
+        &format!("SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE id = ?1"),
+        params![id],
+        snapshot_from_row,
+    )
+    .map_err(|e| format!("snapshot_put: {e}"))
+}
+
+#[tauri::command]
+fn snapshot_latest(project_id: String, file_name: String) -> Result<Option<SnapshotRow>, String> {
+    let conn = db()?;
+    let row = conn.query_row(
+        &format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ),
+        params![project_id, file_name],
+        snapshot_from_row,
+    );
+    match row {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("snapshot_latest: {e}")),
+    }
+}
+
+#[tauri::command]
+fn snapshot_list(project_id: String, file_name: String, limit: u32) -> Result<Vec<SnapshotRow>, String> {
+    let conn = db()?;
+    let limit = if limit == 0 { SNAPSHOT_RETENTION } else { limit as i64 };
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT ?3"
+        ))
+        .map_err(|e| format!("snapshot_list: {e}"))?;
+    let rows = stmt
+        .query_map(params![project_id, file_name, limit], snapshot_from_row)
+        .map_err(|e| format!("snapshot_list: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("snapshot_list: {e}"))
+}
+
+#[tauri::command]
+fn snapshot_delete(id: String) -> Result<(), String> {
+    let conn = db()?;
+    conn.execute("DELETE FROM snapshots WHERE id = ?1", params![id])
+        .map_err(|e| format!("snapshot_delete: {e}"))?;
     Ok(())
 }
 
-#[tauri::command]
-fn envset_upsert(project_id: String, file_name: String, sha256: String) -> Result<EnvSetRow, String> {
-    let conn = db()?;
-    let id = new_id();
-    let updated = now_iso();
-    conn.execute(
-        "INSERT INTO env_sets (id, project_id, file_name, sha256, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(project_id, file_name) DO UPDATE SET sha256 = excluded.sha256, updated_at = excluded.updated_at",
-        params![id, project_id, file_name, sha256, updated],
-    )
-    .map_err(|e| format!("envset_upsert: {e}"))?;
-    conn.query_row(
-        "SELECT id, project_id, file_name, sha256, updated_at FROM env_sets WHERE project_id = ?1 AND file_name = ?2",
-        params![project_id, file_name],
-        |r| {
-            Ok(EnvSetRow {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                file_name: r.get(2)?,
-                sha256: r.get(3)?,
-                updated_at: r.get(4)?,
-            })
-        },
-    )
-    .map_err(|e| format!("envset_upsert: {e}"))
+// ---------------------------------------------------------------------------
+// Parent-folder scan (read-only: names + git remotes, never file contents)
+// ---------------------------------------------------------------------------
+
+/// Shared cancel flag for the in-flight scan (`scan_cancel` flips it).
+#[derive(Default)]
+struct ScanCancel(Arc<AtomicBool>);
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanRow {
+    folder_path: String,
+    repo_root: String,
+    repo_subpath: String,
+    git_remote: Option<String>,
+    env_files: Vec<String>,
+    is_git: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgress {
+    scanned: u64,
+    found: u64,
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
+fn relative_posix(root: &Path, folder: &Path) -> String {
+    match folder.strip_prefix(root) {
+        Ok(relative) => relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("/"),
+        Err(_) => String::new(),
+    }
+}
+
+fn scan_blocking(
+    app: AppHandle,
+    root: String,
+    max_depth: u32,
+    skip_dirs: Vec<String>,
+    cancel: Arc<AtomicBool>,
+) -> Result<Vec<ScanRow>, String> {
+    let root_path = PathBuf::from(&root);
+    let meta = std::fs::metadata(&root_path).map_err(|e| format!("scan root {root}: {e}"))?;
+    if !meta.is_dir() {
+        return Err(format!("scan root {root}: not a folder"));
+    }
+
+    let depth_limit = if max_depth == 0 { 3 } else { max_depth };
+    let skip: HashSet<String> = skip_dirs.iter().map(|name| name.to_lowercase()).collect();
+    let mut remote_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+    let mut rows: Vec<ScanRow> = Vec::new();
+    let mut stack: Vec<(PathBuf, u32, Option<PathBuf>)> =
+        vec![(root_path.clone(), 0, find_git_root(&root_path))];
+    let mut scanned: u64 = 0;
+    const VISIT_CAP: u64 = 20_000;
+
+    while let Some((dir, depth, repo_root)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) || scanned >= VISIT_CAP {
+            break;
+        }
+        scanned += 1;
+        if scanned % 200 == 0 {
+            let _ = app.emit(
+                "scan://progress",
+                ScanProgress { scanned, found: rows.len() as u64 },
+            );
+        }
+
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            // Permission errors and disappearing folders are skipped.
+            Err(_) => continue,
+        };
+
+        let mut env_files: Vec<String> = Vec::new();
+        let mut children: Vec<PathBuf> = Vec::new();
+        for entry in entries.flatten() {
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            // Never follow symlinks (loops + escaping the chosen root).
+            if file_type.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if file_type.is_dir() {
+                if name.starts_with('.') || skip.contains(&name.to_lowercase()) {
+                    continue;
+                }
+                if depth < depth_limit {
+                    children.push(entry.path());
+                }
+            } else if file_type.is_file() && (name == ".env" || name.starts_with(".env.")) {
+                // Raw names only; TS applies `isTrackableEnvFile`.
+                env_files.push(name);
+            }
+        }
+
+        if !env_files.is_empty() {
+            env_files.sort();
+            let (row_root, row_subpath, is_git) = match &repo_root {
+                Some(repo) => (repo.clone(), relative_posix(repo, &dir), true),
+                None => (dir.clone(), String::new(), false),
+            };
+            let git_remote = if is_git {
+                let cached = remote_cache.get(&row_root).cloned();
+                match cached {
+                    Some(value) => value,
+                    None => {
+                        let value = git_remote_get_url(row_root.to_string_lossy().to_string())
+                            .ok()
+                            .flatten();
+                        remote_cache.insert(row_root.clone(), value.clone());
+                        value
+                    }
+                }
+            } else {
+                None
+            };
+            rows.push(ScanRow {
+                folder_path: dir.to_string_lossy().to_string(),
+                repo_root: row_root.to_string_lossy().to_string(),
+                repo_subpath: row_subpath,
+                git_remote,
+                env_files,
+                is_git,
+            });
+        }
+
+        for child in children {
+            let child_repo = if child.join(".git").exists() {
+                Some(child.clone())
+            } else {
+                repo_root.clone()
+            };
+            stack.push((child, depth + 1, child_repo));
+        }
+    }
+
+    let _ = app.emit(
+        "scan://progress",
+        ScanProgress { scanned, found: rows.len() as u64 },
+    );
+    Ok(rows)
 }
 
 #[tauri::command]
-fn envset_list(project_id: String) -> Result<Vec<EnvSetRow>, String> {
-    let conn = db()?;
-    let mut stmt = conn
-        .prepare("SELECT id, project_id, file_name, sha256, updated_at FROM env_sets WHERE project_id = ?1 ORDER BY file_name")
-        .map_err(|e| format!("envset_list: {e}"))?;
-    let rows = stmt
-        .query_map(params![project_id], |r| {
-            Ok(EnvSetRow {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                file_name: r.get(2)?,
-                sha256: r.get(3)?,
-                updated_at: r.get(4)?,
-            })
-        })
-        .map_err(|e| format!("envset_list: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("envset_list: {e}"))
+async fn scan_env_projects(
+    app: AppHandle,
+    state: State<'_, ScanCancel>,
+    root: String,
+    max_depth: u32,
+    skip_dirs: Vec<String>,
+) -> Result<Vec<ScanRow>, String> {
+    state.0.store(false, Ordering::SeqCst);
+    let cancel = state.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        scan_blocking(app, root, max_depth, skip_dirs, cancel)
+    })
+    .await
+    .map_err(|e| format!("scan task failed: {e}"))?
+}
+
+#[tauri::command]
+fn scan_cancel(state: State<'_, ScanCancel>) {
+    state.0.store(true, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -438,156 +702,11 @@ fn git_remote_get_url(path: String) -> Result<Option<String>, String> {
     }
 }
 
-/// Open a URL in the system browser (sign-in flow). OS integration only —
-/// the auth exchange itself stays TS-side in `src/lib/cloud.ts`.
-#[tauri::command]
-fn open_in_browser(url: String) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    #[cfg(target_os = "macos")]
-    Command::new("open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    #[cfg(target_os = "linux")]
-    Command::new("xdg-open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// OS keychain (P2: holds wrapped master key / session secrets)
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-fn keychain_set(service: String, account: String, secret: String) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    entry.set_password(&secret).map_err(|e| format!("keychain set: {e}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn keychain_get(service: String, account: String) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    match entry.get_password() {
-        Ok(s) => Ok(Some(s)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("keychain get: {e}")),
-    }
-}
-
-#[tauri::command]
-fn keychain_delete(service: String, account: String) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("keychain delete: {e}")),
-    }
-}
-
-#[tauri::command]
-fn watch_stub(_path: String) -> Result<(), String> {
-    // P1 ships polling via `file_stat` instead of a push watcher.
-    Err("watch: polling via file_stat in P1 (see src/lib/tauri.ts)".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// OAuth sign-in window (OS window management only — no auth/product logic).
-// Currently unused: sign-in runs via the system browser + pasted code
-// (see `open_in_browser`), which proved more reliable across machines than
-// an embedded popup. Kept for a future deep-link return path.
-// ---------------------------------------------------------------------------
-
-/// Host of the OAuth redirect back to the app. Must be allowlisted in
-/// Supabase (Auth → URL Configuration → Redirect URLs) as
-/// `https://env-manager.local/auth/callback`. The host never resolves — the
-/// navigation is intercepted below before anything loads.
-const OAUTH_CALLBACK_HOST: &str = "env-manager.local";
-
-/// Pending OAuth result: `Some(code)` on success, `Some("github oauth: …")`
-/// on provider error. Polled from TS via `take_oauth_code`.
-struct OauthState(Mutex<Option<String>>);
-
-/// Open the provider sign-in page in a small centered window.
-#[tauri::command]
-fn open_oauth_window(app: AppHandle, url: String) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("oauth") {
-        w.close().map_err(|e| format!("oauth window: {e}"))?;
-    }
-    if let Some(state) = app.try_state::<OauthState>() {
-        if let Ok(mut pending) = state.0.lock() {
-            *pending = None;
-        }
-    }
-    let parsed: tauri::Url = url.parse().map_err(|e| format!("oauth url: {e}"))?;
-    let handle = app.clone();
-    let handle = app.clone();
-    tauri::WebviewWindowBuilder::new(&app, "oauth", tauri::WebviewUrl::External(parsed))
-        .title("Sign in with GitHub")
-        .inner_size(480.0, 640.0)
-        .center()
-        .focused(true)
-        .on_navigation(move |nav_url| {
-            if nav_url.host_str() != Some(OAUTH_CALLBACK_HOST) {
-                return true;
-            }
-            let code = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.into_owned());
-            let err = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "error")
-                .map(|(_, v)| format!("github oauth: {v}"));
-            if let Some(state) = handle.try_state::<OauthState>() {
-                if let Ok(mut pending) = state.0.lock() {
-                    *pending = code.or(err);
-                }
-            }
-            // Block the navigation — there is nothing to load.
-            false
-        })
-        .build()
-        .map_err(|e| format!("oauth window: {e}"))?;
-    Ok(())
-}
-
-/// Take the pending OAuth result, if any (clears it).
-#[tauri::command]
-fn take_oauth_code(state: State<OauthState>) -> Option<String> {
-    state.0.lock().ok().and_then(|mut pending| pending.take())
-}
-
-#[tauri::command]
-fn close_oauth_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("oauth") {
-        w.close().map_err(|e| format!("close oauth window: {e}"))?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn is_oauth_window_open(app: AppHandle) -> bool {
-    app.get_webview_window("oauth").is_some()
-}
-
-#[tauri::command]
-fn keychain_stub(_action: String) -> Result<(), String> {
-    // Kept for roadmap reference; real keychain_* commands are above.
-    Err("keychain_stub: use keychain_set/get/delete".to_string())
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .manage(OauthState(Mutex::new(None)))        .invoke_handler(tauri::generate_handler![
+        .manage(ScanCancel::default())
+        .invoke_handler(tauri::generate_handler![
             read_env_file,
             write_env_file,
             list_env_files,
@@ -595,27 +714,20 @@ fn main() {
             backup_env_file,
             git_remote_get_url,
             device_name,
-            open_in_browser,
             project_add,
             project_list,
             project_get,
             project_remove,
-            project_set_local_only,
-            envset_upsert,
-            envset_list,
+            snapshot_put,
+            snapshot_latest,
+            snapshot_list,
+            snapshot_delete,
+            scan_env_projects,
+            scan_cancel,
             links_read,
             links_write,
             config_read,
-            config_write,
-            keychain_set,
-            keychain_get,
-            keychain_delete,
-            open_oauth_window,
-            take_oauth_code,
-            close_oauth_window,
-            is_oauth_window_open,
-            watch_stub,
-            keychain_stub
+            config_write
         ])
         .run(tauri::generate_context!())
         .expect("error while running env-manager");

@@ -32,7 +32,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }): Reac
             key={t.id}
             role={t.kind === 'error' ? 'alert' : 'status'}
             className={cn(
-              'pointer-events-auto w-full max-w-md rounded-md border px-4 py-3 text-sm shadow-lg',
+              'pointer-events-auto w-full max-w-md rounded-md border px-4 py-3 text-sm shadow-lg dark:shadow-black/60',
               t.kind === 'error'
                 ? 'border-destructive bg-destructive text-destructive-foreground'
                 : 'bg-card text-card-foreground',

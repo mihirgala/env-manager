@@ -1,20 +1,24 @@
 /**
- * Zero-knowledge crypto — P2. Real implementation via `libsodium-wrappers`.
+ * Zero-knowledge crypto — portable across machines.
  *
- * passphrase → Argon2id → master key → per-project DEKs, derived as
- * keyed-BLAKE2b(master, projectId) so no key storage is needed.
- * Payloads use XChaCha20-Poly1305; the server only ever sees envelopes plus
- * `plaintext_sha256` for conflict detection.
+ * passphrase + envelope salt → Argon2id → master key → per-file DEKs, derived
+ * as BLAKE2b-256(key = master, message = "<identity>:<fileName>"), so the same
+ * repo decrypts on any machine regardless of its local SQLite row id.
+ *
+ * Payloads use XChaCha20-Poly1305 with `fileName` as additional data, so a
+ * `.env` ciphertext cannot be relabelled `.env.production`.
  *
  * Invariants: passphrase / master key / DEK / plaintext never leave the
- * device, are never logged, and are never sent to Supabase. The master key
- * lives in module memory only and `lock()` wipes it.
+ * device, are never logged, and are never written to disk in plaintext. The
+ * master key lives in module memory only and `lock()` wipes it.
  */
 
 import sodium from 'libsodium-wrappers-sumo'
 
-export const ENVELOPE_VERSION = 1 as const
+export const ENVELOPE_VERSION = 2 as const
 export const ENVELOPE_ALGO = 'xchacha20poly1305' as const
+/** Recovery blobs keep their own version — bumping envelopes must not orphan them. */
+export const RECOVERY_VERSION = 1 as const
 
 export interface CryptoEnvelope {
   v: typeof ENVELOPE_VERSION
@@ -26,7 +30,7 @@ export interface CryptoEnvelope {
 
 /** Recovery blob: master key sealed under a key derived from the recovery code. */
 export interface RecoveryBlob {
-  v: typeof ENVELOPE_VERSION
+  v: typeof RECOVERY_VERSION
   salt: string
   nonce: string
   sealed: string
@@ -44,6 +48,15 @@ let masterSalt: string | null = null
 
 export function isUnlocked(): boolean {
   return masterKey !== null
+}
+
+/**
+ * Public Argon2id salt of the held session key (not a secret). Lets bundle
+ * import pick the session key when the envelope salt matches, and fall back
+ * to asking for the bundle's passphrase otherwise.
+ */
+export function currentSalt(): string | null {
+  return masterSalt
 }
 
 /** Wipe the in-memory master key. */
@@ -101,50 +114,113 @@ function requireMaster(): Uint8Array {
   return masterKey
 }
 
-function projectDek(projectId: string): Uint8Array {
-  // Deterministic per-project DEK: keyed hash, no storage needed.
+/** Deterministic per-file DEK: keyed hash of `<identity>:<fileName>`. */
+function fileDek(master: Uint8Array, identity: string, fileName: string): Uint8Array {
   return sodium.crypto_generichash(
     sodium.crypto_aead_xchacha20poly1305_ietf_KEYBYTES,
-    projectId,
-    requireMaster(),
+    `${identity}:${fileName}`,
+    master,
   )
 }
 
-export async function encryptProject(projectId: string, plaintext: string): Promise<CryptoEnvelope> {
+function checkEnvelope(env: CryptoEnvelope): void {
+  if (env.v !== ENVELOPE_VERSION) throw new Error('crypto: unsupported envelope version')
+  if (env.algo !== ENVELOPE_ALGO) throw new Error('crypto: unsupported envelope algo')
+}
+
+function requireFileName(identity: string, fileName: string): void {
+  if (identity.trim() === '') throw new Error('crypto: identity is required')
+  if (fileName.trim() === '') throw new Error('crypto: fileName is required')
+}
+
+/** Encrypt one project file under the held master key. */
+export async function encryptFile(
+  identity: string,
+  fileName: string,
+  plaintext: string,
+): Promise<CryptoEnvelope> {
   await ensureReady()
+  requireFileName(identity, fileName)
+  const master = requireMaster()
   const nonce = sodium.randombytes_buf(sodium.crypto_aead_xchacha20poly1305_ietf_NPUBBYTES)
-  const dek = projectDek(projectId)
-  const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
-    plaintext,
-    null,
-    null,
-    nonce,
-    dek,
-  )
-  sodium.memzero(dek)
-  // `salt` records the KDF salt of the master setup (rotation bookkeeping);
-  // per-envelope randomness comes from the nonce.
-  return { v: ENVELOPE_VERSION, salt: masterSalt ?? '', nonce: b64(nonce), algo: ENVELOPE_ALGO, ciphertext: b64(ciphertext) }
+  const dek = fileDek(master, identity, fileName)
+  try {
+    const ciphertext = sodium.crypto_aead_xchacha20poly1305_ietf_encrypt(
+      plaintext,
+      fileName,
+      null,
+      nonce,
+      dek,
+    )
+    return {
+      v: ENVELOPE_VERSION,
+      salt: masterSalt ?? '',
+      nonce: b64(nonce),
+      algo: ENVELOPE_ALGO,
+      ciphertext: b64(ciphertext),
+    }
+  } finally {
+    sodium.memzero(dek)
+  }
 }
 
-export async function decryptProject(projectId: string, envelope: CryptoEnvelope): Promise<string> {
+/** Decrypt one project file under the held master key. */
+export async function decryptFile(
+  identity: string,
+  fileName: string,
+  env: CryptoEnvelope,
+): Promise<string> {
   await ensureReady()
-  if (envelope.v !== ENVELOPE_VERSION || envelope.algo !== ENVELOPE_ALGO) {
-    throw new Error('crypto: unsupported envelope version/algo')
-  }
-  const dek = projectDek(projectId)
+  checkEnvelope(env)
+  requireFileName(identity, fileName)
+  const master = requireMaster()
+  const dek = fileDek(master, identity, fileName)
   try {
     const open = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
       null,
-      unb64(envelope.ciphertext),
-      null,
-      unb64(envelope.nonce),
+      unb64(env.ciphertext),
+      fileName,
+      unb64(env.nonce),
       dek,
     )
     return new TextDecoder().decode(open)
   } catch {
     throw new Error('crypto: decrypt failed — wrong key or corrupted envelope')
   } finally {
+    sodium.memzero(dek)
+  }
+}
+
+/**
+ * Bundle import: derive the bundle's master key from its own salt without
+ * touching the local session key. Used when a bundle was created on another
+ * machine with a different passphrase setup.
+ */
+export async function decryptFileWithPassphrase(
+  passphrase: string,
+  identity: string,
+  fileName: string,
+  env: CryptoEnvelope,
+): Promise<string> {
+  await ensureReady()
+  checkEnvelope(env)
+  requireFileName(identity, fileName)
+  if (env.salt === '') throw new Error('crypto: envelope is missing its KDF salt')
+  const master = await deriveMasterKey(passphrase, unb64(env.salt))
+  const dek = fileDek(master, identity, fileName)
+  try {
+    const open = sodium.crypto_aead_xchacha20poly1305_ietf_decrypt(
+      null,
+      unb64(env.ciphertext),
+      fileName,
+      unb64(env.nonce),
+      dek,
+    )
+    return new TextDecoder().decode(open)
+  } catch {
+    throw new Error('crypto: decrypt failed — wrong passphrase or corrupted envelope')
+  } finally {
+    sodium.memzero(master)
     sodium.memzero(dek)
   }
 }
@@ -166,7 +242,7 @@ export async function generateRecoveryKey(): Promise<{ code: string; blob: Recov
   sodium.memzero(raw)
   sodium.memzero(recKey)
   const blob: RecoveryBlob = {
-    v: ENVELOPE_VERSION,
+    v: RECOVERY_VERSION,
     salt: b64(salt),
     nonce: b64(nonce),
     sealed: b64(sealed),
@@ -177,7 +253,7 @@ export async function generateRecoveryKey(): Promise<{ code: string; blob: Recov
 /** Recover (and hold) the master key from a code + stored blob. */
 export async function recoverWithCode(code: string, blob: RecoveryBlob, setupSalt?: string): Promise<void> {
   await ensureReady()
-  if (blob.v !== ENVELOPE_VERSION) throw new Error('crypto: unsupported recovery blob')
+  if (blob.v !== RECOVERY_VERSION) throw new Error('crypto: unsupported recovery blob')
   const recKey = await deriveMasterKey(code.trim().toLowerCase(), unb64(blob.salt))
   try {
     const master = sodium.crypto_secretbox_open_easy(

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import { Layout } from '@/components/layout'
 import { AuthGate } from '@/components/auth-gate'
+import { ThemeProvider } from '@/components/theme-provider'
 import { ToastProvider } from '@/components/toaster'
 import { AddProjectScreen } from '@/screens/add-project'
 import { ProjectDetailScreen } from '@/screens/project-detail'
@@ -29,9 +30,11 @@ if (rootEl === null) throw new Error('#root element missing in index.html')
 createRoot(rootEl).render(
   <StrictMode>
     <ToastProvider>
-      <AuthGate>
-        <RouterProvider router={router} />
-      </AuthGate>
+      <ThemeProvider>
+        <AuthGate>
+          <RouterProvider router={router} />
+        </AuthGate>
+      </ThemeProvider>
     </ToastProvider>
   </StrictMode>,
 )

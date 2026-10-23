@@ -1,7 +1,7 @@
 /**
  * Tauri ↔ TS adapter — the ONLY module allowed to import `@tauri-apps/*`.
  *
- * Everything else in `src/lib` stays pure so `npm run dev` works without
+ * Everything else in `src/lib` stays pure so `pnpm dev` works without
  * Rust: outside Tauri this module falls back to mocks / clear errors.
  */
 
@@ -10,13 +10,13 @@ export function isTauri(): boolean {
 }
 
 function needsTauri(what: string): never {
-  throw new Error(`${what} needs the desktop app — run \`npm run tauri dev\` (Tauri + Rust)`)
+  throw new Error(`${what} needs the desktop app — run \`pnpm tauri dev\` (Tauri + Rust)`)
 }
 
 /** Folder picker. Returns the selected path, or null when cancelled. */
 export async function pickProjectFolder(): Promise<string | null> {
   if (!isTauri()) {
-    // Dev fallback so `npm run dev` works without Rust: a real `<button>`
+    // Dev fallback so `pnpm dev` works without Rust: a real `<button>`
     // already triggered this, `prompt` keeps it keyboard-accessible.
     const manual = window.prompt('Project folder path (dev fallback — picker needs `tauri dev`):')
     return manual?.trim() ? manual.trim() : null
@@ -26,21 +26,53 @@ export async function pickProjectFolder(): Promise<string | null> {
   return typeof picked === 'string' ? picked : null
 }
 
+export interface DialogFilter {
+  name: string
+  extensions: string[]
+}
+
+/** Save dialog (bundles / plaintext exports). Returns null when cancelled. */
+export async function pickSaveFile(
+  defaultName: string,
+  filters: DialogFilter[],
+): Promise<string | null> {
+  if (!isTauri()) {
+    const manual = window.prompt('Save to path (dev fallback — dialog needs `tauri dev`):', defaultName)
+    return manual?.trim() ? manual.trim() : null
+  }
+  const { save } = await import('@tauri-apps/plugin-dialog')
+  const picked = await save({ defaultPath: defaultName, filters })
+  return typeof picked === 'string' ? picked : null
+}
+
+/** Open dialog (bundle / plaintext import). Returns null when cancelled. */
+export async function pickOpenFile(filters: DialogFilter[]): Promise<string | null> {
+  if (!isTauri()) {
+    const manual = window.prompt('File path (dev fallback — dialog needs `tauri dev`):')
+    return manual?.trim() ? manual.trim() : null
+  }
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({ multiple: false, filters })
+  return typeof picked === 'string' ? picked : null
+}
+
 export interface ProjectRow {
   id: string
   identity: string
   displayName: string
   folderPath: string
-  localOnly: boolean
   createdAt: string
 }
 
-export interface EnvSetRow {
+/** Opaque snapshot row as stored in SQLite (`envelope` is JSON text). */
+export interface SnapshotWire {
   id: string
   projectId: string
   fileName: string
-  sha256: string
-  updatedAt: string
+  envelope: string
+  plaintextSha256: string
+  source: 'local' | 'import'
+  createdAt: string
 }
 
 export interface FileStat {
@@ -82,6 +114,44 @@ export async function fileStat(path: string): Promise<FileStat | null> {
   return invoke<FileStat | null>('file_stat', { path })
 }
 
+/** One folder produced by the read-only parent-folder scan. */
+export interface ScanRow {
+  folderPath: string
+  repoRoot: string
+  repoSubpath: string
+  gitRemote: string | null
+  /** Raw `.env*` names directly in the folder — TS applies the policy. */
+  envFiles: string[]
+  /** Present from Rust; optional so tests can use minimal rows. */
+  isGit?: boolean
+}
+
+export interface ScanProgress {
+  scanned: number
+  found: number
+}
+
+export async function scanEnvProjects(input: {
+  root: string
+  maxDepth: number
+  skipDirs: string[]
+}): Promise<ScanRow[]> {
+  return invoke<ScanRow[]>('scan_env_projects', input)
+}
+
+export async function cancelScan(): Promise<void> {
+  await invoke('scan_cancel')
+}
+
+/** Subscribe to progress; returns the unlisten function. */
+export async function listenScanProgress(
+  callback: (progress: ScanProgress) => void,
+): Promise<() => void> {
+  if (!isTauri()) return () => {}
+  const { listen } = await import('@tauri-apps/api/event')
+  return listen<ScanProgress>('scan://progress', (event) => callback(event.payload))
+}
+
 /** Copies `<path>` to `<path>.backup-<ts>`; returns the backup path. */
 export async function backupEnvFile(path: string): Promise<string> {
   return invoke<string>('backup_env_file', { path })
@@ -108,20 +178,33 @@ export async function projectRemove(id: string): Promise<void> {
   await invoke('project_remove', { id })
 }
 
-export async function projectSetLocalOnly(id: string, localOnly: boolean): Promise<void> {
-  await invoke('project_set_local_only', { id, localOnly })
-}
-
-export async function envsetUpsert(input: {
+export async function snapshotPut(input: {
   projectId: string
   fileName: string
-  sha256: string
-}): Promise<EnvSetRow> {
-  return invoke<EnvSetRow>('envset_upsert', input)
+  envelope: string
+  plaintextSha256: string
+  source: 'local' | 'import'
+}): Promise<SnapshotWire> {
+  return invoke<SnapshotWire>('snapshot_put', input)
 }
 
-export async function envsetList(projectId: string): Promise<EnvSetRow[]> {
-  return invoke<EnvSetRow[]>('envset_list', { projectId })
+export async function snapshotLatest(
+  projectId: string,
+  fileName: string,
+): Promise<SnapshotWire | null> {
+  return invoke<SnapshotWire | null>('snapshot_latest', { projectId, fileName })
+}
+
+export async function snapshotList(
+  projectId: string,
+  fileName: string,
+  limit = 20,
+): Promise<SnapshotWire[]> {
+  return invoke<SnapshotWire[]>('snapshot_list', { projectId, fileName, limit })
+}
+
+export async function snapshotDelete(id: string): Promise<void> {
+  await invoke('snapshot_delete', { id })
 }
 
 export async function linksRead(): Promise<Record<string, string>> {
@@ -139,43 +222,4 @@ export async function configRead(): Promise<Record<string, unknown>> {
 
 export async function configWrite(value: Record<string, unknown>): Promise<void> {
   await invoke('config_write', { value })
-}
-
-export async function keychainSet(service: string, account: string, secret: string): Promise<void> {
-  await invoke('keychain_set', { service, account, secret })
-}
-
-export async function keychainGet(service: string, account: string): Promise<string | null> {
-  return invoke<string | null>('keychain_get', { service, account })
-}
-
-export async function keychainDelete(service: string, account: string): Promise<void> {
-  await invoke('keychain_delete', { service, account })
-}
-
-/**
- * OAuth sign-in runs through the system browser + a pasted code
- * (see `src/components/github-sign-in.tsx`). Kept for a future deep-link
- * return path; the popup flow is currently unused.
- */
-export async function openOAuthWindow(url: string): Promise<void> {
-  await invoke('open_oauth_window', { url })
-}
-
-/** Take (and clear) the pending OAuth `code`, or null when none yet. */
-export async function takeOAuthCode(): Promise<string | null> {
-  return invoke<string | null>('take_oauth_code')
-}
-
-export async function closeOAuthWindow(): Promise<void> {
-  await invoke('close_oauth_window').catch(() => {})
-}
-
-export async function isOAuthWindowOpen(): Promise<boolean> {
-  return invoke<boolean>('is_oauth_window_open')
-}
-
-/** Open a URL in the system browser (sign-in flow). */
-export async function openInBrowser(url: string): Promise<void> {
-  await invoke('open_in_browser', { url })
 }
