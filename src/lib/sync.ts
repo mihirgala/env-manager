@@ -139,6 +139,37 @@ export async function planRestore(
 }
 
 /**
+ * Write a complete dotenv document after backing up the existing file, then
+ * append a snapshot under `source`. Never overwrites without a backup (when
+ * a file exists) and never stores plaintext.
+ */
+async function commitText(
+  ctx: SyncContext,
+  opts: FileTarget,
+  text: string,
+  source: SnapshotSource,
+): Promise<{ backupPath: string | null; sha256: string }> {
+  let backupPath: string | null = null
+  try {
+    await ctx.io.readFile(opts.filePath)
+    backupPath = await ctx.io.backupFile(opts.filePath)
+  } catch {
+    backupPath = null
+  }
+  await ctx.io.writeFile(opts.filePath, text)
+  const sha256 = await sha256Hex(text)
+  const envelope = await encryptFile(opts.identity, opts.fileName, text)
+  await ctx.store.put({
+    projectId: opts.projectId,
+    fileName: opts.fileName,
+    envelope,
+    plaintextSha256: sha256,
+    source,
+  })
+  return { backupPath, sha256 }
+}
+
+/**
  * Apply the latest snapshot: back up the existing file, write decrypted
  * text, then record a fresh local snapshot so status returns to `backed-up`.
  */
@@ -149,24 +180,18 @@ export async function applyRestore(
   const snap = await ctx.store.latest(opts.projectId, opts.fileName)
   if (snap === null) throw new Error('sync: no stored snapshot to restore')
   const storedText = await decryptFile(opts.identity, opts.fileName, snap.envelope)
-  let backupPath: string | null = null
-  try {
-    await ctx.io.readFile(opts.filePath)
-    backupPath = await ctx.io.backupFile(opts.filePath)
-  } catch {
-    backupPath = null
-  }
-  // Lossless application: the snapshot is a complete dotenv document.
-  await ctx.io.writeFile(opts.filePath, storedText)
-  const sha256 = await sha256Hex(storedText)
-  await ctx.store.put({
-    projectId: opts.projectId,
-    fileName: opts.fileName,
-    envelope: snap.envelope,
-    plaintextSha256: sha256,
-    source: 'local',
-  })
-  return { backupPath, sha256 }
+  return commitText(ctx, opts, storedText, 'local')
+}
+
+/**
+ * Apply text from a bundle / plaintext import. Backs up an existing file
+ * first and records the snapshot as `source: 'import'`.
+ */
+export async function applyImportedText(
+  ctx: SyncContext,
+  opts: FileTarget & { text: string },
+): Promise<{ backupPath: string | null; sha256: string }> {
+  return commitText(ctx, opts, opts.text, 'import')
 }
 
 /** `locked` | `not-backed-up` | `backed-up` | `changed` — exactly four states. */

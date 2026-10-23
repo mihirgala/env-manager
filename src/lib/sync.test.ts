@@ -3,6 +3,7 @@ import { lock, setupPassphrase } from './crypto'
 import { sha256Hex } from './hash'
 import { createMemoryStore } from './store'
 import {
+  applyImportedText,
   applyRestore,
   backupToVault,
   planRestore,
@@ -101,6 +102,23 @@ describe('snapshot engine (memory store + memory fs)', () => {
 
     expect(await projectStatus(ctx, target)).toBe('backed-up')
     expect(store.rows).toHaveLength(2)
+  })
+
+  it('imported text backs up the old file first and stores source import', async () => {
+    await setupPassphrase('sync-passphrase-4a')
+    const store = createMemoryStore()
+    const files = new Map([['/p/.env', 'K=old\n']])
+    const io = memoryIO(files)
+    const ctx: SyncContext = { store, io }
+
+    const applied = await applyImportedText(ctx, { ...target, text: 'K=imported\n' })
+
+    expect(applied.backupPath).not.toBeNull()
+    expect(await io.readFile(applied.backupPath as string)).toBe('K=old\n')
+    expect(files.get('/p/.env')).toBe('K=imported\n')
+    expect(store.rows[0]?.source).toBe('import')
+    expect(JSON.stringify(store.rows)).not.toContain('imported')
+    expect(await projectStatus(ctx, target)).toBe('backed-up')
   })
 
   it('missing snapshot → not-backed-up; restore is a no-op', async () => {

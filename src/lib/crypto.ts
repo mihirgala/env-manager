@@ -50,6 +50,15 @@ export function isUnlocked(): boolean {
   return masterKey !== null
 }
 
+/**
+ * Public Argon2id salt of the held session key (not a secret). Lets bundle
+ * import pick the session key when the envelope salt matches, and fall back
+ * to asking for the bundle's passphrase otherwise.
+ */
+export function currentSalt(): string | null {
+  return masterSalt
+}
+
 /** Wipe the in-memory master key. */
 export function lock(): void {
   if (masterKey !== null) {

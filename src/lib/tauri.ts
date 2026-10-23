@@ -26,6 +26,36 @@ export async function pickProjectFolder(): Promise<string | null> {
   return typeof picked === 'string' ? picked : null
 }
 
+export interface DialogFilter {
+  name: string
+  extensions: string[]
+}
+
+/** Save dialog (bundles / plaintext exports). Returns null when cancelled. */
+export async function pickSaveFile(
+  defaultName: string,
+  filters: DialogFilter[],
+): Promise<string | null> {
+  if (!isTauri()) {
+    const manual = window.prompt('Save to path (dev fallback — dialog needs `tauri dev`):', defaultName)
+    return manual?.trim() ? manual.trim() : null
+  }
+  const { save } = await import('@tauri-apps/plugin-dialog')
+  const picked = await save({ defaultPath: defaultName, filters })
+  return typeof picked === 'string' ? picked : null
+}
+
+/** Open dialog (bundle / plaintext import). Returns null when cancelled. */
+export async function pickOpenFile(filters: DialogFilter[]): Promise<string | null> {
+  if (!isTauri()) {
+    const manual = window.prompt('File path (dev fallback — dialog needs `tauri dev`):')
+    return manual?.trim() ? manual.trim() : null
+  }
+  const { open } = await import('@tauri-apps/plugin-dialog')
+  const picked = await open({ multiple: false, filters })
+  return typeof picked === 'string' ? picked : null
+}
+
 export interface ProjectRow {
   id: string
   identity: string

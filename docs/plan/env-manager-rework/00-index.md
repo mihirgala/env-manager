@@ -80,7 +80,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 1. Remove hosted backend + pnpm only
 - [x] 2. Portable crypto
 - [x] 3. SQLite vault + snapshots
-- [ ] 4. Import/export bundles
+- [x] 4. Import/export bundles
 - [ ] 5. Parent-folder scan
 - [ ] 6. Screens rewiring
 - [ ] 7. Dark mode
@@ -104,6 +104,10 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   `sync.ts` around `backupToVault` / `planRestore` / `applyRestore` with four statuses, and
   auto-backup after save when unlocked. `pnpm test` (41) + `pnpm build` green; Rust not
   compiled locally (cargo absent) — CI validates the Tauri build.
+- **2026-10-23 — step 4 done.** Added `bundle.ts` (strict parse, encrypted `.envmgr`
+  build/serialize/decrypt, no plaintext or sha), `env-files.ts` policy, save/open dialog
+  adapters + `dialog:allow-save`, and `applyImportedText` so plaintext/bundle imports back
+  up before writing with `source: 'import'`. `pnpm test` (51) + `pnpm build` green.
 
 ## Environment notes
 
