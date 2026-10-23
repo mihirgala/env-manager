@@ -78,7 +78,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 ## Status
 
 - [x] 1. Remove hosted backend + pnpm only
-- [ ] 2. Portable crypto
+- [x] 2. Portable crypto
 - [ ] 3. SQLite vault + snapshots
 - [ ] 4. Import/export bundles
 - [ ] 5. Parent-folder scan
@@ -94,6 +94,10 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   `supabase/`), `src/lib/cloud-config.ts` → `config.ts`, all `npm` → `pnpm`, pnpm-only
   lockfile. Added `.gitattributes` (`*.env -text`) so Windows `core.autocrlf` can't corrupt
   the lossless fixture round-trip tests. `pnpm test` (33) + `pnpm build` green.
+- **2026-10-23 — step 2 done.** Crypto now keys off `identity:fileName` (BLAKE2b DEK,
+  fileName as AEAD AAD), envelope `v: 2`, recovery blob stays `v: 1`. Added
+  `encryptFile` / `decryptFile` / `decryptFileWithPassphrase`; removed project-id keying.
+  `pnpm test src/lib/crypto.test.ts` (12) + `pnpm build` green.
 
 ## Environment notes
 

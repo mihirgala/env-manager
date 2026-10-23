@@ -85,8 +85,7 @@ describe('sync engine (memory cloud + memory fs)', () => {
     const { sha256 } = await pushProject(ctx, {
       identity: 'github.com/a/b',
       displayName: 'b',
-      projectId: 'proj-a',
-      filePath: '/p/.env',
+            filePath: '/p/.env',
       deviceName: 'laptop-a',
     })
     expect(sha256).toBe(await sha256Hex('API_KEY=example-secret\n'))
@@ -103,17 +102,17 @@ describe('sync engine (memory cloud + memory fs)', () => {
     const ioA = memoryIO(new Map([['/a/.env', 'K=one\n']]))
     await pushProject(
       { cloud, io: ioA, lastSyncedSha: null },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/a/.env', deviceName: 'a' },
+      { identity: 'github.com/a/b', displayName: 'b', filePath: '/a/.env', deviceName: 'a' },
     )
     const ioB = memoryIO(new Map())
     const plan = await planPull(
       { cloud, io: ioB, lastSyncedSha: null },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
+      { identity: 'github.com/a/b', filePath: '/b/.env' },
     )
     expect(plan?.diff.added).toEqual(['K'])
     const applied = await applyPull(
       { cloud, io: ioB, lastSyncedSha: null },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
+      { identity: 'github.com/a/b', filePath: '/b/.env' },
     )
     expect(applied.backupPath).toBeNull()
     expect(ioB.backups).toHaveLength(0)
@@ -127,19 +126,19 @@ describe('sync engine (memory cloud + memory fs)', () => {
     const ioA = memoryIO(new Map([['/a/.env', 'K=cloud\n']]))
     const pushed = await pushProject(
       { cloud, io: ioA, lastSyncedSha: null },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/a/.env', deviceName: 'a' },
+      { identity: 'github.com/a/b', displayName: 'b', filePath: '/a/.env', deviceName: 'a' },
     )
     // Local edits after the last sync → conflict on pull.
     const ioB = memoryIO(new Map([['/b/.env', 'K=local-edit\n']]))
     const plan = await planPull(
       { cloud, io: ioB, lastSyncedSha: pushed.sha256 },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
+      { identity: 'github.com/a/b', filePath: '/b/.env' },
     )
     expect(plan?.conflict).toBe(true)
     expect(plan?.diff.changed).toEqual(['K'])
     const applied = await applyPull(
       { cloud, io: ioB, lastSyncedSha: pushed.sha256 },
-      { identity: 'github.com/a/b', projectId: 'proj-a', filePath: '/b/.env' },
+      { identity: 'github.com/a/b', filePath: '/b/.env' },
     )
     expect(applied.backupPath).not.toBeNull()
     expect(await ioB.readFile(applied.backupPath as string)).toBe('K=local-edit\n')
@@ -156,7 +155,7 @@ describe('sync engine (memory cloud + memory fs)', () => {
     expect(await projectStatus({ cloud, io, lastSyncedSha: null }, { ...base, localOnly: false })).toBe('clean')
     const { sha256 } = await pushProject(
       { cloud, io, lastSyncedSha: null },
-      { ...base, identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', deviceName: 'a' },
+      { ...base, identity: 'github.com/a/b', displayName: 'b', deviceName: 'a' },
     )
     // Local edit after push → ahead.
     files.set('/p/.env', 'K=2\n')
@@ -165,7 +164,7 @@ describe('sync engine (memory cloud + memory fs)', () => {
     files.set('/p/.env', 'K=1\n')
     await pushProject(
       { cloud, io: memoryIO(new Map([['/x/.env', 'K=3\n']])), lastSyncedSha: sha256 },
-      { identity: 'github.com/a/b', displayName: 'b', projectId: 'proj-a', filePath: '/x/.env', deviceName: 'b' },
+      { identity: 'github.com/a/b', displayName: 'b', filePath: '/x/.env', deviceName: 'b' },
     )
     expect(await projectStatus({ cloud, io, lastSyncedSha: sha256 }, { ...base, localOnly: false })).toBe('behind')
   })

@@ -8,7 +8,7 @@
  * Plaintext / keys never leave this module except into the caller's files.
  */
 
-import { decryptProject, encryptProject, type CryptoEnvelope } from './crypto'
+import { decryptFile, encryptFile, type CryptoEnvelope } from './crypto'
 import { getValue, parse } from './dotenv'
 import { sha256Hex } from './hash'
 
@@ -46,6 +46,11 @@ export interface FileIO {
   backupFile(path: string): Promise<string>
 }
 
+/** Leaf name of a path (the DEK/AAD binding for a file). */
+export function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? '.env'
+}
+
 /** Key-level diff between local plaintext and decrypted remote plaintext. */
 export function previewDiff(localText: string, remoteText: string): DiffPreview {
   const localKeys = new Map<string, string>()
@@ -76,7 +81,7 @@ function isCleanDiff(d: DiffPreview): boolean {
 export interface SyncContext {
   cloud: CloudClient
   io: FileIO
-  /** Last cloud sha we successfully pushed/pulled (persisted per env set in P1 vault terms). */
+  /** Last stored sha we successfully pushed/pulled. */
   lastSyncedSha: string | null
 }
 
@@ -86,11 +91,11 @@ export interface SyncContext {
  */
 export async function pushProject(
   ctx: SyncContext,
-  opts: { identity: string; displayName: string; projectId: string; filePath: string; deviceName: string },
+  opts: { identity: string; displayName: string; filePath: string; deviceName: string },
 ): Promise<{ sha256: string }> {
   const localText = await ctx.io.readFile(opts.filePath)
   const sha = await sha256Hex(localText)
-  const envelope = await encryptProject(opts.projectId, localText)
+  const envelope = await encryptFile(opts.identity, fileNameOf(opts.filePath), localText)
   const project = await ctx.cloud.upsertProject(opts.identity, opts.displayName)
   await ctx.cloud.pushSnapshot(project.id, {
     envelope,
@@ -113,14 +118,14 @@ export interface PullPlan {
  */
 export async function planPull(
   ctx: SyncContext,
-  opts: { identity: string; projectId: string; filePath: string },
+  opts: { identity: string; filePath: string },
 ): Promise<PullPlan | null> {
   const projects = await ctx.cloud.listProjects()
   const match = projects.find((p) => p.identity === opts.identity)
   if (match === undefined) return null
   const snap = await ctx.cloud.latestSnapshot(match.id)
   if (snap === null) return null
-  const remoteText = await decryptProject(opts.projectId, snap.envelope)
+  const remoteText = await decryptFile(opts.identity, fileNameOf(opts.filePath), snap.envelope)
   let localText = ''
   try {
     localText = await ctx.io.readFile(opts.filePath)
@@ -142,14 +147,14 @@ export async function planPull(
 /** Explicit apply step: backup the local file, then write the decrypted remote text. */
 export async function applyPull(
   ctx: SyncContext,
-  opts: { identity: string; projectId: string; filePath: string },
+  opts: { identity: string; filePath: string },
 ): Promise<{ backupPath: string | null; sha256: string }> {
   const projects = await ctx.cloud.listProjects()
   const match = projects.find((p) => p.identity === opts.identity)
-  if (match === undefined) throw new Error('sync: project not found in cloud')
+  if (match === undefined) throw new Error('sync: project not found in the store')
   const snap = await ctx.cloud.latestSnapshot(match.id)
-  if (snap === null) throw new Error('sync: no cloud snapshot')
-  const remoteText = await decryptProject(opts.projectId, snap.envelope)
+  if (snap === null) throw new Error('sync: no stored snapshot')
+  const remoteText = await decryptFile(opts.identity, fileNameOf(opts.filePath), snap.envelope)
   let backupPath: string | null = null
   try {
     await ctx.io.readFile(opts.filePath)
