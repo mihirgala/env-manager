@@ -2,13 +2,16 @@
 
 A local-first, GUI-only env manager for developers with many projects across many laptops.
 
-It syncs your `.env` files between machines through encrypted cloud backup — **without ever locking you in**. If you stop using this app tomorrow, your projects still work exactly as before: plain `.env` files, no dependencies, no config committed to your repos.
+It keeps your `.env` files safe and portable — **without ever locking you in**. If you stop using
+this app tomorrow, your projects still work exactly as before: plain `.env` files, no dependencies,
+no config committed to your repos.
 
 ## Why
 
-- You switch laptops and want your projects to "just work" — `git clone`, pull envs, keep coding.
+- You switch laptops and want your projects to "just work" — `git clone`, restore envs, keep coding.
 - You don't want to paste secrets into chat, email, or plain cloud notes.
-- Collaborators should **never be forced** to install this. Adoption is per-laptop, per-user, per-project.
+- Collaborators should **never be forced** to install this. Adoption is per-laptop, per-user,
+  per-project.
 
 ## Non-goals / guarantees (no lock-in)
 
@@ -20,62 +23,69 @@ It syncs your `.env` files between machines through encrypted cloud backup — *
 ## How it works
 
 ```
-+-------------------+        +-------------------+        +------------------+
-|  Desktop GUI      |        |  Local vault      |        |  Supabase cloud  |
-|  Tauri + Vite     | <----> |  ~/.env-manager/  | <----> |  ciphertext only |
-|  React + TS       |        |  SQLite + cache   |  E2E   |  Postgres + Auth |
-+-------------------+        +-------------------+ encrypted +------------------+
++-------------------+        +------------------------+        +------------------+
+|  Desktop GUI      |        |  Local vault           |        |  .envmgr bundle  |
+|  Tauri + Vite     | <----> |  ~/.env-manager/       | <----> |  ciphertext only |
+|  React + TS       |        |  SQLite + snapshots    |  E2E   |  (manual move)   |
++-------------------+        +------------------------+        +------------------+
         | reads/writes plain .env files in place (comments + order preserved)
         v
   your projects (untouched repos)
 ```
 
-- **Project identity:** normalized `git remote origin` URL (e.g. `github.com/foo/bar`) so the same repo auto-matches on any laptop. Fallback: manual link with a local UUID for non-git folders.
-- **Local vault:** `~/.env-manager/vault.db` (projects, env sets, sync state) + `links.json` (folder → project mapping). Nothing is written into target repos.
-- **Cloud (optional):** Supabase Postgres stores only zero-knowledge envelopes `{ salt, nonce, ciphertext }`. Plaintext SHA-256 is stored for conflict detection only.
-- **Encryption (default: zero-knowledge):** passphrase → Argon2id → master key → per-project data keys (XChaCha20-Poly1305 via libsodium). Recovery key shown once. OS keychain holds unlocked keys. A per-project "local-only" toggle skips cloud entirely.
-- **Auth (optional):** local-only mode needs no account. Cloud mode uses Supabase Auth with optional GitHub OAuth sign-in.
+- **Project identity:** normalized `git remote origin` URL (e.g. `github.com/foo/bar`) so the same
+  repo auto-matches on any laptop. Fallback: manual link with a local UUID for non-git folders.
+- **Local vault:** `~/.env-manager/vault.db` (projects, env sets, encrypted snapshots) +
+  `links.json` (folder → project mapping). Nothing is written into target repos.
+- **No server, no account.** There is no hosted backend and no auth. Moving a project between
+  machines happens through encrypted `.envmgr` bundles you copy yourself.
+- **Encryption (zero-knowledge):** passphrase → Argon2id → master key → per-project data keys
+  (XChaCha20-Poly1305 via libsodium). The passphrase is typed manually each session — it is never
+  persisted and never leaves the device.
 
 ## Status / roadmap
 
-> v0.1 (P0) — scaffold: Tauri shell boots, folder picker + git-remote detect. **DONE** — see [docs/ROADMAP.md](docs/ROADMAP.md).
+> v0.1 (P0) — scaffold: Tauri shell boots, folder picker + git-remote detect. **DONE** — see
+> [docs/ROADMAP.md](docs/ROADMAP.md).
 
-- [x] **P0 — scaffold:** app boots, Supabase migrations, add-project flow skeleton
+- [x] **P0 — scaffold:** app boots, add-project flow skeleton
 - [x] **P1 — local:** SQLite vault, lossless `.env` view/edit, status badges, file watcher
-- [x] **P2 — cloud E2E:** passphrase unlock + recovery key, encrypted push/pull, conflict backups (live E2E needs your Supabase keys in Settings)
-- [x] **P3 — polish:** multi-file sets (`.env`, `.env.local`), device list, export/unlink, team sharing prep (v2)
+- [x] **P2 — encryption:** passphrase unlock + recovery key, encrypted snapshots, conflict backups
+- [x] **P3 — polish:** multi-file sets (`.env`, `.env.local`), export/unlink
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for details.
 
 ## Quick start (dev)
 
-Prerequisites: Node 20+, npm, Rust toolchain + Tauri system deps (see [Tauri prerequisites](https://tauri.app/start/prerequisites/)).
+Prerequisites: Node 20+, pnpm, Rust toolchain + Tauri system deps (see
+[Tauri prerequisites](https://tauri.app/start/prerequisites/)).
 
 ```powershell
-npm install
-npm run dev        # Vite frontend only
-npm run tauri dev  # full desktop app (needs Rust)
+pnpm install
+pnpm dev        # Vite frontend only
+pnpm tauri dev  # full desktop app (needs Rust)
 ```
 
-> Rust is not installed in every dev environment. `npm run dev` / `npm run build` work without it; only `tauri dev` / `tauri build` need it.
+> Rust is not installed in every dev environment. `pnpm dev` / `pnpm build` work without it; only
+> `pnpm tauri dev` / `pnpm tauri build` need it.
 
 ## Project structure
 
 ```
 src/               # Vite React UI + src/lib (identity, dotenv, vault, crypto, sync)
-src-tauri/         # Rust backend: fs, git, watcher, keychain (thin)
-supabase/          # SQL migrations + RLS policies
+src-tauri/         # Rust backend: fs, git, watcher, SQLite rows (thin)
 docs/              # roadmap, architecture notes
 ```
 
-Tauri backend stays thin by design — all product logic lives in `src/lib` (TypeScript) so it stays testable without Rust.
+Tauri backend stays thin by design — all product logic lives in `src/lib` (TypeScript) so it stays
+testable without Rust.
 
 ## Contributing
 
 PRs and issues welcome. Please:
 
-1. Don't commit real `.env` files or secrets (use `.env.example` only).
+1. Don't commit real `.env` files or secrets (use fixtures under `src/lib/__fixtures__/`).
 2. Keep target-project repos untouched in tests — use fixtures under `src/lib/__fixtures__/`.
-3. Run `npm run build` before opening a PR.
+3. Run `pnpm build` before opening a PR.
 
 License: [MIT](LICENSE).

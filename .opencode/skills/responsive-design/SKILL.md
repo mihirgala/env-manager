@@ -35,7 +35,7 @@ Load this skill for any UI work in `src/` — new screens, components, CSS, layo
 - [ ] Resize to 360px wide — no overlap, no h-scroll, buttons reachable
 - [ ] Resize to 1440px — content capped (`max-width: ~1100px` centered), not stretched edge-to-edge
 - [ ] Keyboard: Tab reaches Add Project → list → Push/Pull → Settings
-- [ ] `npm run build` passes
+- [ ] `pnpm build` passes
 
 ## Anti-patterns
 

@@ -7,7 +7,7 @@
  * `plaintext_sha256` for conflict detection.
  *
  * Invariants: passphrase / master key / DEK / plaintext never leave the
- * device, are never logged, and are never sent to Supabase. The master key
+ * device, are never logged, and are never written to disk in plaintext. The master key
  * lives in module memory only and `lock()` wipes it.
  */
 

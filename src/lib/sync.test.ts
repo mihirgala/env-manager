@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { MemoryCloudClient } from './cloud'
-import { lock, setupPassphrase } from './crypto'
+import { lock, setupPassphrase, type CryptoEnvelope } from './crypto'
 import { sha256Hex } from './hash'
 import {
   applyPull,
@@ -8,9 +7,50 @@ import {
   previewDiff,
   projectStatus,
   pushProject,
+  type CloudClient,
+  type CloudProject,
+  type CloudSnapshot,
   type FileIO,
   type SyncContext,
 } from './sync'
+
+/** In-memory storage double — mimics a local snapshot store, envelopes only. */
+class MemoryCloudClient implements CloudClient {
+  private projects: CloudProject[] = []
+  private snapshots = new Map<string, CloudSnapshot[]>()
+  private n = 0
+
+  async listProjects(): Promise<CloudProject[]> {
+    return [...this.projects]
+  }
+
+  async upsertProject(identity: string, displayName: string): Promise<CloudProject> {
+    const existing = this.projects.find((p) => p.identity === identity)
+    if (existing !== undefined) return existing
+    const row: CloudProject = { id: `cloud-${++this.n}`, identity, displayName }
+    this.projects.push(row)
+    return row
+  }
+
+  async latestSnapshot(projectId: string): Promise<CloudSnapshot | null> {
+    const all = this.snapshots.get(projectId) ?? []
+    return all.length > 0 ? (all[all.length - 1] as CloudSnapshot) : null
+  }
+
+  async pushSnapshot(
+    projectId: string,
+    snap: { envelope: CryptoEnvelope; plaintextSha256: string; deviceName: string },
+  ): Promise<void> {
+    const all = this.snapshots.get(projectId) ?? []
+    all.push({ ...snap, createdAt: new Date(0).toISOString() })
+    this.snapshots.set(projectId, all)
+  }
+
+  /** Test helper: what the store holds (ciphertext only). */
+  storedSnapshots(projectId: string): CloudSnapshot[] {
+    return [...(this.snapshots.get(projectId) ?? [])]
+  }
+}
 
 function memoryIO(files: Map<string, string>): FileIO & { backups: string[] } {
   const backups: string[] = []

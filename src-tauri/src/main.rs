@@ -1,17 +1,14 @@
 // Thin backend by design: filesystem read/write, `git remote` lookup, local
 // SQLite vault, `links.json` / `config.json` files, file stats for the
-// watcher poll, `.env` backups, OS keychain hold, OS device name, and opening
-// URLs in the system browser. No crypto, dotenv parsing, sync logic, or
-// Supabase calls here — those live in `src/lib` (TypeScript) so they stay
-// testable without Rust. See `docs/ARCHITECTURE.md`.
+// watcher poll, `.env` backups, and the OS device name. No crypto, dotenv
+// parsing, or sync logic here — those live in `src/lib` (TypeScript) so they
+// stay testable without Rust. See `docs/ARCHITECTURE.md`.
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, State};
 
 // ---------------------------------------------------------------------------
 // Paths (~/.env-manager/)
@@ -438,156 +435,10 @@ fn git_remote_get_url(path: String) -> Result<Option<String>, String> {
     }
 }
 
-/// Open a URL in the system browser (sign-in flow). OS integration only —
-/// the auth exchange itself stays TS-side in `src/lib/cloud.ts`.
-#[tauri::command]
-fn open_in_browser(url: String) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    Command::new("cmd")
-        .args(["/C", "start", "", &url])
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    #[cfg(target_os = "macos")]
-    Command::new("open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    #[cfg(target_os = "linux")]
-    Command::new("xdg-open")
-        .arg(&url)
-        .spawn()
-        .map_err(|e| format!("open browser: {e}"))?;
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// OS keychain (P2: holds wrapped master key / session secrets)
-// ---------------------------------------------------------------------------
-
-#[tauri::command]
-fn keychain_set(service: String, account: String, secret: String) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    entry.set_password(&secret).map_err(|e| format!("keychain set: {e}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-fn keychain_get(service: String, account: String) -> Result<Option<String>, String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    match entry.get_password() {
-        Ok(s) => Ok(Some(s)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(format!("keychain get: {e}")),
-    }
-}
-
-#[tauri::command]
-fn keychain_delete(service: String, account: String) -> Result<(), String> {
-    let entry = keyring::Entry::new(&service, &account).map_err(|e| format!("keychain: {e}"))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(format!("keychain delete: {e}")),
-    }
-}
-
-#[tauri::command]
-fn watch_stub(_path: String) -> Result<(), String> {
-    // P1 ships polling via `file_stat` instead of a push watcher.
-    Err("watch: polling via file_stat in P1 (see src/lib/tauri.ts)".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// OAuth sign-in window (OS window management only — no auth/product logic).
-// Currently unused: sign-in runs via the system browser + pasted code
-// (see `open_in_browser`), which proved more reliable across machines than
-// an embedded popup. Kept for a future deep-link return path.
-// ---------------------------------------------------------------------------
-
-/// Host of the OAuth redirect back to the app. Must be allowlisted in
-/// Supabase (Auth → URL Configuration → Redirect URLs) as
-/// `https://env-manager.local/auth/callback`. The host never resolves — the
-/// navigation is intercepted below before anything loads.
-const OAUTH_CALLBACK_HOST: &str = "env-manager.local";
-
-/// Pending OAuth result: `Some(code)` on success, `Some("github oauth: …")`
-/// on provider error. Polled from TS via `take_oauth_code`.
-struct OauthState(Mutex<Option<String>>);
-
-/// Open the provider sign-in page in a small centered window.
-#[tauri::command]
-fn open_oauth_window(app: AppHandle, url: String) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("oauth") {
-        w.close().map_err(|e| format!("oauth window: {e}"))?;
-    }
-    if let Some(state) = app.try_state::<OauthState>() {
-        if let Ok(mut pending) = state.0.lock() {
-            *pending = None;
-        }
-    }
-    let parsed: tauri::Url = url.parse().map_err(|e| format!("oauth url: {e}"))?;
-    let handle = app.clone();
-    let handle = app.clone();
-    tauri::WebviewWindowBuilder::new(&app, "oauth", tauri::WebviewUrl::External(parsed))
-        .title("Sign in with GitHub")
-        .inner_size(480.0, 640.0)
-        .center()
-        .focused(true)
-        .on_navigation(move |nav_url| {
-            if nav_url.host_str() != Some(OAUTH_CALLBACK_HOST) {
-                return true;
-            }
-            let code = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "code")
-                .map(|(_, v)| v.into_owned());
-            let err = nav_url
-                .query_pairs()
-                .find(|(k, _)| k == "error")
-                .map(|(_, v)| format!("github oauth: {v}"));
-            if let Some(state) = handle.try_state::<OauthState>() {
-                if let Ok(mut pending) = state.0.lock() {
-                    *pending = code.or(err);
-                }
-            }
-            // Block the navigation — there is nothing to load.
-            false
-        })
-        .build()
-        .map_err(|e| format!("oauth window: {e}"))?;
-    Ok(())
-}
-
-/// Take the pending OAuth result, if any (clears it).
-#[tauri::command]
-fn take_oauth_code(state: State<OauthState>) -> Option<String> {
-    state.0.lock().ok().and_then(|mut pending| pending.take())
-}
-
-#[tauri::command]
-fn close_oauth_window(app: AppHandle) -> Result<(), String> {
-    if let Some(w) = app.get_webview_window("oauth") {
-        w.close().map_err(|e| format!("close oauth window: {e}"))?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-fn is_oauth_window_open(app: AppHandle) -> bool {
-    app.get_webview_window("oauth").is_some()
-}
-
-#[tauri::command]
-fn keychain_stub(_action: String) -> Result<(), String> {
-    // Kept for roadmap reference; real keychain_* commands are above.
-    Err("keychain_stub: use keychain_set/get/delete".to_string())
-}
-
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .manage(OauthState(Mutex::new(None)))        .invoke_handler(tauri::generate_handler![
+        .invoke_handler(tauri::generate_handler![
             read_env_file,
             write_env_file,
             list_env_files,
@@ -595,7 +446,6 @@ fn main() {
             backup_env_file,
             git_remote_get_url,
             device_name,
-            open_in_browser,
             project_add,
             project_list,
             project_get,
@@ -606,16 +456,7 @@ fn main() {
             links_read,
             links_write,
             config_read,
-            config_write,
-            keychain_set,
-            keychain_get,
-            keychain_delete,
-            open_oauth_window,
-            take_oauth_code,
-            close_oauth_window,
-            is_oauth_window_open,
-            watch_stub,
-            keychain_stub
+            config_write
         ])
         .run(tauri::generate_context!())
         .expect("error while running env-manager");

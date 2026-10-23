@@ -10,11 +10,11 @@ metadata:
 
 # Repo Rules — env-manager
 
-Load this before touching cloud, sync, crypto, dotenv parser, or Tauri backend code.
+Load this before touching vault, sync, crypto, dotenv parser, or Tauri backend code.
 
 ## When to use me
 
-- Adding Push/Pull/sync, Supabase queries, migrations, RLS
+- Adding snapshot, bundle import/export, or sync logic
 - Editing `src/lib` dotenv parser, identity, crypto, vault
 - Editing `src-tauri/` Rust commands
 - Writing tests with `.env` content
@@ -31,7 +31,7 @@ Load this before touching cloud, sync, crypto, dotenv parser, or Tauri backend c
 - [ ] No real `.env`, `vault.db`, `cache/`, `*.backup-*`, tokens, or passphrases in git.
 - [ ] Fixtures use `EXAMPLE_KEY=example-value` placeholders only.
 - [ ] Logs / errors never print plaintext secrets — redact values, log keys + hashes only.
-- [ ] Supabase rows contain ciphertext + `plaintext_sha256` only. No plaintext columns.
+- [ ] Snapshots and bundles contain ciphertext + `plaintext_sha256` only. No plaintext fields.
 
 ## 3. Lossless dotenv
 
@@ -41,18 +41,18 @@ Load this before touching cloud, sync, crypto, dotenv parser, or Tauri backend c
 
 ## 4. Thin Rust
 
-- `src-tauri/` allowed: fs read/write, `git remote get-url`, file watcher, OS keychain.
-- Forbidden in Rust: crypto, dotenv parsing, sync logic, Supabase calls. Those live in `src/lib` (TS).
-- Every Tauri command has a TS adapter type so Vite `npm run dev` works without Rust.
+- `src-tauri/` allowed: fs read/write, `git remote get-url`, file watcher, SQLite rows, dialogs.
+- Forbidden in Rust: crypto, dotenv parsing, sync logic. Those live in `src/lib` (TS).
+- Every Tauri command has a TS adapter type so Vite `pnpm dev` works without Rust.
 
 ## 5. Zero-knowledge + identity
 
-- Passphrase / master key / DEK / plaintext never leave device, never logged, never sent to Supabase.
+- Passphrase / master key / DEK / plaintext never leave device, never logged, never written unencrypted.
 - Envelope shape only: `{ v, salt, nonce, algo: "xchacha20poly1305", ciphertext }`.
-- RLS: `owner_id = auth.uid()` on `projects` + `env_snapshots`. No service-role key in client.
+- The vault holds opaque ciphertext rows; keys are derived in TS, never stored.
 - Identity normalize: `git@github.com:Foo/bar.git` → `github.com/foo/bar`. Fallback UUID lives in `~/.env-manager/links.json`, never in repo.
 - Conflicts: never silent overwrite — show diff, write `.env.backup-<ts>`, then apply.
 
 ## Fail the change if
 
-Any unchecked box above, `npm run build` red, or a real secret appears in diff.
+Any unchecked box above, `pnpm build` red, or a real secret appears in diff.

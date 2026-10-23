@@ -1,7 +1,7 @@
 import * as React from 'react'
 import { isUnlocked } from '@/lib/crypto'
 import { isTauri } from '@/lib/tauri'
-import { loadConfig } from '@/lib/cloud-config'
+import { loadConfig } from '@/lib/config'
 import { UnlockScreen } from '@/screens/unlock'
 
 /**

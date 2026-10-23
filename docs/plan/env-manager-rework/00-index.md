@@ -77,7 +77,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 
 ## Status
 
-- [ ] 1. Remove hosted backend + pnpm only
+- [x] 1. Remove hosted backend + pnpm only
 - [ ] 2. Portable crypto
 - [ ] 3. SQLite vault + snapshots
 - [ ] 4. Import/export bundles
@@ -87,6 +87,13 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [ ] 8. Skills + docs
 - [ ] 9. Packaging + CI
 - [ ] 10. Verification
+
+## Progress log
+
+- **2026-10-23 — step 1 done.** Supabase/auth/keychain/plugin-fs removed (TS + Rust +
+  `supabase/`), `src/lib/cloud-config.ts` → `config.ts`, all `npm` → `pnpm`, pnpm-only
+  lockfile. Added `.gitattributes` (`*.env -text`) so Windows `core.autocrlf` can't corrupt
+  the lossless fixture round-trip tests. `pnpm test` (33) + `pnpm build` green.
 
 ## Environment notes
 

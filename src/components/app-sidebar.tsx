@@ -21,7 +21,7 @@ import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 const mainNav = [
   { to: '/', label: 'Projects', icon: FolderKanban, end: true, tooltip: 'Projects (all)' },
   { to: '/add', label: 'Add Project', icon: FolderPlus, end: false, tooltip: 'Add a project folder' },
-  { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false, tooltip: 'Device, encryption, cloud' },
+  { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false, tooltip: 'Device, encryption, export' },
 ]
 
 function useCollapsed(): boolean {

@@ -79,7 +79,7 @@ export class Vault {
   }
 }
 
-/** In-memory driver for tests and `npm run dev` without Tauri. */
+/** In-memory driver for tests and `pnpm dev` without Tauri. */
 export function createMemoryDriver(): VaultDriver & { projects: ProjectRecord[] } {
   const projects: ProjectRecord[] = []
   const envSets: EnvSetRecord[] = []
@@ -142,7 +142,7 @@ export function createMemoryDriver(): VaultDriver & { projects: ProjectRecord[] 
   }
 }
 
-/** Default driver — live Tauri backend. Throws a clear error under `npm run dev`. */
+/** Default driver — live Tauri backend. Throws a clear error under `pnpm dev`. */
 export function createTauriDriver(): VaultDriver {
   // Static import is safe: `./tauri` (the only module allowed to touch
   // `@tauri-apps/*`) imports those packages dynamically at call time only.

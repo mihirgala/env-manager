@@ -1,7 +1,7 @@
 /**
  * Tauri ↔ TS adapter — the ONLY module allowed to import `@tauri-apps/*`.
  *
- * Everything else in `src/lib` stays pure so `npm run dev` works without
+ * Everything else in `src/lib` stays pure so `pnpm dev` works without
  * Rust: outside Tauri this module falls back to mocks / clear errors.
  */
 
@@ -10,13 +10,13 @@ export function isTauri(): boolean {
 }
 
 function needsTauri(what: string): never {
-  throw new Error(`${what} needs the desktop app — run \`npm run tauri dev\` (Tauri + Rust)`)
+  throw new Error(`${what} needs the desktop app — run \`pnpm tauri dev\` (Tauri + Rust)`)
 }
 
 /** Folder picker. Returns the selected path, or null when cancelled. */
 export async function pickProjectFolder(): Promise<string | null> {
   if (!isTauri()) {
-    // Dev fallback so `npm run dev` works without Rust: a real `<button>`
+    // Dev fallback so `pnpm dev` works without Rust: a real `<button>`
     // already triggered this, `prompt` keeps it keyboard-accessible.
     const manual = window.prompt('Project folder path (dev fallback — picker needs `tauri dev`):')
     return manual?.trim() ? manual.trim() : null
@@ -139,43 +139,4 @@ export async function configRead(): Promise<Record<string, unknown>> {
 
 export async function configWrite(value: Record<string, unknown>): Promise<void> {
   await invoke('config_write', { value })
-}
-
-export async function keychainSet(service: string, account: string, secret: string): Promise<void> {
-  await invoke('keychain_set', { service, account, secret })
-}
-
-export async function keychainGet(service: string, account: string): Promise<string | null> {
-  return invoke<string | null>('keychain_get', { service, account })
-}
-
-export async function keychainDelete(service: string, account: string): Promise<void> {
-  await invoke('keychain_delete', { service, account })
-}
-
-/**
- * OAuth sign-in runs through the system browser + a pasted code
- * (see `src/components/github-sign-in.tsx`). Kept for a future deep-link
- * return path; the popup flow is currently unused.
- */
-export async function openOAuthWindow(url: string): Promise<void> {
-  await invoke('open_oauth_window', { url })
-}
-
-/** Take (and clear) the pending OAuth `code`, or null when none yet. */
-export async function takeOAuthCode(): Promise<string | null> {
-  return invoke<string | null>('take_oauth_code')
-}
-
-export async function closeOAuthWindow(): Promise<void> {
-  await invoke('close_oauth_window').catch(() => {})
-}
-
-export async function isOAuthWindowOpen(): Promise<boolean> {
-  return invoke<boolean>('is_oauth_window_open')
-}
-
-/** Open a URL in the system browser (sign-in flow). */
-export async function openInBrowser(url: string): Promise<void> {
-  await invoke('open_in_browser', { url })
 }

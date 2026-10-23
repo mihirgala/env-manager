@@ -4,19 +4,14 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/components/toaster'
 import { sha256Hex } from '@/lib/hash'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
-import { backupEnvFile, isTauri, readEnvFile, writeEnvFile } from '@/lib/tauri'
-import { isUnlocked } from '@/lib/crypto'
-import { isCloudConfigured, lastSyncedKey, loadConfig, makeCloudClient, saveConfig } from '@/lib/cloud-config'
-import { projectStatus, type SyncStatus } from '@/lib/sync'
+import { isTauri, readEnvFile } from '@/lib/tauri'
+import { loadConfig, saveConfig } from '@/lib/config'
 import * as React from 'react'
 
-type RowStatus = SyncStatus | 'unknown'
+type RowStatus = 'clean' | 'diverged' | 'unknown'
 
-const statusVariant: Record<RowStatus, 'secondary' | 'success' | 'warning' | 'outline' | 'destructive'> = {
-  'local-only': 'secondary',
+const statusVariant: Record<RowStatus, 'success' | 'warning' | 'outline' | 'destructive'> = {
   clean: 'success',
-  behind: 'warning',
-  ahead: 'warning',
   diverged: 'destructive',
   unknown: 'outline',
 }
@@ -26,6 +21,7 @@ export function ProjectsScreen(): React.JSX.Element {
   const [projects, setProjects] = React.useState<ProjectRecord[] | null>(null)
   const [failed, setFailed] = React.useState(false)
   const [showOnboarding, setShowOnboarding] = React.useState(false)
+  const [statuses, setStatuses] = React.useState<Record<string, RowStatus>>({})
 
   React.useEffect(() => {
     let cancelled = false
@@ -34,36 +30,22 @@ export function ProjectsScreen(): React.JSX.Element {
       .listProjects()
       .then(async (rows) => {
         if (cancelled) return
-        // Status: local-only flag wins; cloud behind/ahead when configured +
-        // unlocked; otherwise local clean/diverged from stored vs on-disk sha.
-        const cfg = await loadConfig().catch(() => null)
+        // Local status only: stored sha vs. what is on disk right now.
         const withStatus = await Promise.all(
           rows.map(async (p) => {
-            if (p.localOnly) return { p, status: 'local-only' as RowStatus }
             const sep = p.folderPath.includes('/') ? '/' : '\\'
             const file = `${p.folderPath.replace(/[\\/]+$/, '')}${sep}.env`
-            if (cfg !== null && isCloudConfigured(cfg) && isUnlocked()) {
-              try {
-                const key = lastSyncedKey(p.id, '.env')
-                const st = await projectStatus(
-                  {
-                    cloud: makeCloudClient(cfg),
-                    io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
-                    lastSyncedSha: cfg.lastSynced?.[key] ?? null,
-                  },
-                  { identity: p.identity, filePath: file, localOnly: false },
-                )
-                return { p, status: st as RowStatus }
-              } catch {
-                // fall through to local compare
-              }
-            }
             try {
               const sets = await vault.listEnvSets(p.id)
               const main = sets.find((s) => s.fileName === '.env') ?? sets[0]
               const content = await readEnvFile(file)
               const sha = await sha256Hex(content)
-              return { p, status: (main !== undefined && main.sha256 !== '' && main.sha256 !== sha ? 'diverged' : 'clean') as RowStatus }
+              return {
+                p,
+                status: (main !== undefined && main.sha256 !== '' && main.sha256 !== sha
+                  ? 'diverged'
+                  : 'clean') as RowStatus,
+              }
             } catch {
               return { p, status: 'unknown' as RowStatus }
             }
@@ -75,7 +57,7 @@ export function ProjectsScreen(): React.JSX.Element {
           if (withStatus.length === 0) {
             loadConfig()
               .then((cfg) => {
-                if (!cancelled && (cfg as Record<string, unknown>)['seenOnboarding'] !== true) {
+                if (!cancelled && cfg.seenOnboarding !== true) {
                   setShowOnboarding(true)
                 }
               })
@@ -94,8 +76,6 @@ export function ProjectsScreen(): React.JSX.Element {
     }
   }, [toast])
 
-  const [statuses, setStatuses] = React.useState<Record<string, RowStatus>>({})
-
   if (!isTauri()) {
     return (
       <div className="flex flex-col gap-4">
@@ -104,7 +84,7 @@ export function ProjectsScreen(): React.JSX.Element {
           <CardHeader>
             <CardTitle>Desktop app required</CardTitle>
             <CardDescription>
-              The project vault lives in the Tauri backend. Run <code>npm run tauri dev</code> to
+              The project vault lives in the Tauri backend. Run <code>pnpm tauri dev</code> to
               open the desktop app.
             </CardDescription>
           </CardHeader>
@@ -139,8 +119,8 @@ export function ProjectsScreen(): React.JSX.Element {
             <CardTitle>Welcome — local-first, no lock-in</CardTitle>
             <CardDescription>
               This app is a sidecar: your <code>.env</code> files stay the source of truth, nothing
-              is added to your repos, and local-only mode needs no account. Add a folder, edit
-              values in place, and optionally back up encrypted to Supabase later.
+              is added to your repos, and no account is needed. Add a folder and edit values in
+              place — encrypted backups stay on this device.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -168,7 +148,7 @@ export function ProjectsScreen(): React.JSX.Element {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-wrap items-center gap-2">
-            <Badge variant="secondary">local-only default</Badge>
+            <Badge variant="secondary">no account needed</Badge>
           </CardContent>
         </Card>
       )}

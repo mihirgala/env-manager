@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { recoverWithCode, unlock } from '@/lib/crypto'
-import { loadConfig } from '@/lib/cloud-config'
+import { loadConfig } from '@/lib/config'
 
 /** Shown by the auth gate when encryption is set up but the vault is locked. */
 export function UnlockScreen({ salt, setupSalt, onUnlocked }: {

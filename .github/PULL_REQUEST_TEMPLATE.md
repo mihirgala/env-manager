@@ -2,7 +2,7 @@
 
 ## Checklist
 
-- [ ] `npm run build` green, `npx vitest run` green
+- [ ] `pnpm build` green, `pnpm test` green
 - [ ] No real `.env`, secrets, `vault.db`, or `*.backup-*` in the diff
 - [ ] Dotenv round-trip preserved (`serialize(parse(f)) === f`) if the parser changed
 - [ ] No files written into target repos; export/remove leaves `.env` intact

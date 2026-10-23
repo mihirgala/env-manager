@@ -1,6 +1,7 @@
 /**
- * Encrypted sync — P2. Pure TS engine over an injected `CloudClient` and
- * injected file IO, so every path is unit-testable without Supabase.
+ * Encrypted snapshot engine — pure TS over an injected storage client and
+ * injected file IO, so every path is unit-testable. The client is a local
+ * store; nothing here touches a network.
  *
  * Rules (repo guardrails): push/pull show a diff preview and never silently
  * overwrite — on conflict the caller writes `.env.backup-<ts>` first.
@@ -37,12 +38,6 @@ export interface CloudClient {
   upsertProject(identity: string, displayName: string): Promise<CloudProject>
   latestSnapshot(projectId: string): Promise<CloudSnapshot | null>
   pushSnapshot(projectId: string, snap: Omit<CloudSnapshot, 'createdAt'>): Promise<void>
-}
-
-export class CloudNotConfiguredError extends Error {
-  constructor() {
-    super('sync: cloud not configured — check Settings → Cloud')
-  }
 }
 
 export interface FileIO {
@@ -86,8 +81,8 @@ export interface SyncContext {
 }
 
 /**
- * Push: encrypt local file → upload envelope + sha.
- * Returns the new sha. Throws when locked (crypto) or unconfigured (cloud).
+ * Push: encrypt local file → store envelope + sha.
+ * Returns the new sha. Throws when locked (crypto) or missing (storage).
  */
 export async function pushProject(
   ctx: SyncContext,
