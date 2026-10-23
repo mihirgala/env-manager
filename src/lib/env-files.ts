@@ -1,7 +1,7 @@
 /**
  * Env-file policy — one source of truth for tabs, scan, status, export and
- * bundles. Rust's `list_env_files` returns raw names; all filtering happens
- * here so the rules cannot drift.
+ * portable vault import. Rust's `list_env_files` returns raw names; all filtering
+ * happens here so the rules cannot drift.
  *
  * Trackable: `.env` and `.env.<segment(s)>` (e.g. `.env.local`,
  * `.env.development.local`). Templates, backups and `.envrc` are not.

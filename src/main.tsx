@@ -3,18 +3,25 @@ import { createRoot } from 'react-dom/client'
 import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 import { Layout } from '@/components/layout'
 import { AuthGate } from '@/components/auth-gate'
+import { FirstRunGate } from '@/components/first-run-gate'
 import { ThemeProvider } from '@/components/theme-provider'
 import { ToastProvider } from '@/components/toaster'
 import { AddProjectScreen } from '@/screens/add-project'
+import { OnboardingScreen } from '@/screens/onboarding'
 import { ProjectDetailScreen } from '@/screens/project-detail'
 import { ProjectsScreen } from '@/screens/projects'
 import { SettingsScreen } from '@/screens/settings'
 import './index.css'
 
 const router = createBrowserRouter([
+  { path: '/onboarding', element: <OnboardingScreen /> },
   {
     path: '/',
-    element: <Layout />,
+    element: (
+      <FirstRunGate>
+        <Layout />
+      </FirstRunGate>
+    ),
     children: [
       { index: true, element: <ProjectsScreen /> },
       { path: 'add', element: <AddProjectScreen /> },

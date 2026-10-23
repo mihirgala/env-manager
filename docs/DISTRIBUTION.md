@@ -65,7 +65,8 @@ pnpm tauri build --target universal-apple-darwin
 ## Release checklist
 
 1. `pnpm test` and `pnpm build` green on the release commit.
-2. `git status` clean; no `.env`, `vault.db`, `*.envmgr`, `*.backup-*`, or `src-tauri/target/`.
+2. `git status` clean; no `.env`, `vault.db`, exported vault `.db`, `*.backup-*`, or
+   `src-tauri/target/`.
 3. Version `0.1.0` matches in:
    - `package.json`
    - `src-tauri/Cargo.toml`

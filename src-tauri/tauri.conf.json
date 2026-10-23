@@ -36,7 +36,7 @@
     ],
     "category": "DeveloperTool",
     "shortDescription": "Local-first .env manager with an encrypted vault",
-    "longDescription": "Keeps .env files as the source of truth, backs them up encrypted in a local SQLite vault, and moves them between machines as encrypted bundles. No account, no server.",
+    "longDescription": "Keeps .env files as the source of truth, backs them up encrypted in a local SQLite vault, and moves them between machines as one encrypted vault file. No account, no server.",
     "publisher": "env-manager",
     "copyright": "MIT",
     "macOS": {

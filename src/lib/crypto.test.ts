@@ -103,8 +103,8 @@ describe('crypto (libsodium, real)', () => {
     await expect(encryptFile(identity, file, 'X=1')).rejects.toThrow(/locked/)
   })
 
-  it('second machine: bundle decrypts with its own salt + passphrase', async () => {
-    // Machine A: set up with salt A and encrypt a bundle file.
+  it('second machine: portable envelope decrypts with its own salt + passphrase', async () => {
+    // Machine A: set up with salt A and encrypt a file.
     const { salt: saltA } = await setupPassphrase('machine-a-passphrase')
     const env = await encryptFile(identity, file, 'TOKEN=example\n')
     lock()
@@ -115,12 +115,12 @@ describe('crypto (libsodium, real)', () => {
       'TOKEN=example\n',
     )
 
-    // The wrong passphrase must not open the bundle.
+    // The wrong passphrase must not open the file.
     await expect(
       decryptFileWithPassphrase('not-the-passphrase', identity, file, env),
     ).rejects.toThrow(/decrypt failed/)
 
-    // Sanity: the bundle records machine A's salt, so it is self-contained.
+    // Sanity: the envelope records machine A's salt, so it is self-contained.
     expect(env.salt).toBe(saltA)
     // Importing with the local session key would be wrong (different salt).
     expect(isUnlocked()).toBe(true)

@@ -184,7 +184,7 @@ export async function applyRestore(
 }
 
 /**
- * Apply text from a bundle / plaintext import. Backs up an existing file
+ * Apply text from a plaintext import. Backs up an existing file
  * first and records the snapshot as `source: 'import'`.
  */
 export async function applyImportedText(

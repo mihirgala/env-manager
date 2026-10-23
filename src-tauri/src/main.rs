@@ -1,3 +1,7 @@
+// Hide the console window on Windows release builds. Debug builds keep it so
+// `pnpm tauri dev` stays useful for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 // Thin backend by design: filesystem read/write, `git remote` lookup, local
 // SQLite vault, `links.json` / `config.json` files, file stats for the
 // watcher poll, `.env` backups, and the OS device name. No crypto, dotenv
@@ -352,6 +356,540 @@ fn snapshot_delete(id: String) -> Result<(), String> {
     conn.execute("DELETE FROM snapshots WHERE id = ?1", params![id])
         .map_err(|e| format!("snapshot_delete: {e}"))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Portable vault (.db): one file, project metadata + encrypted snapshots
+//
+// The portable file is a separate SQLite database. Rust only copies opaque
+// rows: envelopes stay JSON text and no plaintext hash is written. TS owns the
+// format, validation, crypto, and merge policy.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableProject {
+    identity: String,
+    display_name: String,
+    folder_path: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableSnapshot {
+    identity: String,
+    file_name: String,
+    /// Opaque envelope JSON. Rust never parses or decrypts it.
+    envelope: String,
+    source: String,
+    created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableVault {
+    meta: HashMap<String, String>,
+    projects: Vec<PortableProject>,
+    snapshots: Vec<PortableSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultExportSummary {
+    projects: u64,
+    snapshots: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportProject {
+    identity: String,
+    display_name: String,
+    folder_path: String,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportSnapshot {
+    identity: String,
+    file_name: String,
+    envelope: String,
+    plaintext_sha256: String,
+    source: String,
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultImport {
+    projects: Vec<ImportProject>,
+    snapshots: Vec<ImportSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VaultImportSummary {
+    projects_added: u64,
+    projects_kept: u64,
+    snapshots_added: u64,
+    snapshots_skipped: u64,
+}
+
+/// Export the live vault to one `.db`. Rejects the live vault path itself.
+#[tauri::command]
+fn vault_export(
+    path: String,
+    salt: String,
+    device_name: String,
+    created_at: String,
+) -> Result<VaultExportSummary, String> {
+    let local = vault_db()?;
+    let dest = PathBuf::from(&path);
+    let same_file = dest.to_string_lossy().eq_ignore_ascii_case(&local.to_string_lossy())
+        || (dest.exists()
+            && local.exists()
+            && dest.canonicalize().ok() == local.canonicalize().ok());
+    if same_file {
+        return Err("Choose a different file name — that is the live vault.".to_string());
+    }
+    let conn = db()?;
+    portable_export(&conn, &dest, &salt, &device_name, &created_at)
+}
+
+/// Export every project and encrypted snapshot into one standalone SQLite file.
+/// The destination is written to a temp path first, then swapped in.
+fn portable_export(
+    conn: &Connection,
+    dest: &Path,
+    salt: &str,
+    device_name: &str,
+    created_at: &str,
+) -> Result<VaultExportSummary, String> {
+    if salt.trim().is_empty() {
+        return Err("vault_export: missing passphrase salt".to_string());
+    }
+    if let Some(parent) = dest.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("vault_export: create folder: {e}"))?;
+        }
+    }
+
+    let temp = PathBuf::from(format!("{}.tmp-{}", dest.display(), std::process::id()));
+    let _ = std::fs::remove_file(&temp);
+
+    let result = (|| -> Result<VaultExportSummary, String> {
+        conn.execute(
+            "ATTACH DATABASE ?1 AS portable",
+            params![temp.to_string_lossy().to_string()],
+        )
+        .map_err(|e| format!("vault_export: attach: {e}"))?;
+        conn.execute_batch(
+            "CREATE TABLE portable.meta (
+               key   TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );
+             CREATE TABLE portable.projects (
+               identity     TEXT PRIMARY KEY,
+               display_name TEXT NOT NULL,
+               folder_path  TEXT NOT NULL,
+               created_at   TEXT NOT NULL
+             );
+             CREATE TABLE portable.snapshots (
+               identity   TEXT NOT NULL,
+               file_name  TEXT NOT NULL,
+               envelope   TEXT NOT NULL,
+               source     TEXT NOT NULL,
+               created_at TEXT NOT NULL
+             );",
+        )
+        .map_err(|e| format!("vault_export: schema: {e}"))?;
+
+        {
+            let mut insert = conn
+                .prepare("INSERT INTO portable.meta (key, value) VALUES (?1, ?2)")
+                .map_err(|e| format!("vault_export: meta prepare: {e}"))?;
+            for (key, value) in [
+                ("format", "env-manager-vault"),
+                ("version", "1"),
+                ("createdAt", created_at),
+                ("salt", salt),
+                ("deviceName", device_name),
+            ] {
+                insert
+                    .execute(params![key, value])
+                    .map_err(|e| format!("vault_export: meta: {e}"))?;
+            }
+        }
+
+        let projects = conn
+            .execute(
+                "INSERT INTO portable.projects (identity, display_name, folder_path, created_at)
+                 SELECT identity, display_name, folder_path, created_at FROM main.projects",
+                [],
+            )
+            .map_err(|e| format!("vault_export: projects: {e}"))?;
+        let snapshots = conn
+            .execute(
+                "INSERT INTO portable.snapshots (identity, file_name, envelope, source, created_at)
+                 SELECT p.identity, s.file_name, s.envelope, s.source, s.created_at
+                 FROM main.snapshots s JOIN main.projects p ON p.id = s.project_id",
+                [],
+            )
+            .map_err(|e| format!("vault_export: snapshots: {e}"))?;
+
+        conn.execute("DETACH DATABASE portable", [])
+            .map_err(|e| format!("vault_export: detach: {e}"))?;
+        Ok(VaultExportSummary {
+            projects: projects as u64,
+            snapshots: snapshots as u64,
+        })
+    })();
+
+    if result.is_err() {
+        let _ = conn.execute("DETACH DATABASE portable", []);
+        let _ = std::fs::remove_file(&temp);
+        return result;
+    }
+
+    if dest.exists() {
+        std::fs::remove_file(&dest).map_err(|e| format!("vault_export: replace: {e}"))?;
+    }
+    if let Err(err) = std::fs::rename(&temp, &dest) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(format!("vault_export: finish: {err}"));
+    }
+    result
+}
+
+/// Read a portable vault without modifying it. TS validates the returned rows.
+#[tauri::command]
+fn vault_read(path: String) -> Result<PortableVault, String> {
+    portable_read(Path::new(&path))
+}
+
+fn portable_read(path: &Path) -> Result<PortableVault, String> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| format!("open vault file: {e}"))?;
+    if !table_exists(&conn, "meta")?
+        || !table_exists(&conn, "projects")?
+        || !table_exists(&conn, "snapshots")?
+    {
+        return Err("This is not an env-manager vault (.db) file.".to_string());
+    }
+
+    let mut meta: HashMap<String, String> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM meta")
+            .map_err(|e| format!("vault_read meta: {e}"))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| format!("vault_read meta: {e}"))?;
+        for row in rows {
+            let (key, value) = row.map_err(|e| format!("vault_read meta: {e}"))?;
+            meta.insert(key, value);
+        }
+    }
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT identity, display_name, folder_path, created_at
+             FROM projects ORDER BY display_name",
+        )
+        .map_err(|e| format!("vault_read projects: {e}"))?;
+    let projects = stmt
+        .query_map([], |r| {
+            Ok(PortableProject {
+                identity: r.get(0)?,
+                display_name: r.get(1)?,
+                folder_path: r.get(2)?,
+                created_at: r.get(3)?,
+            })
+        })
+        .map_err(|e| format!("vault_read projects: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("vault_read projects: {e}"))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT identity, file_name, envelope, source, created_at
+             FROM snapshots ORDER BY identity, file_name, created_at",
+        )
+        .map_err(|e| format!("vault_read snapshots: {e}"))?;
+    let snapshots = stmt
+        .query_map([], |r| {
+            Ok(PortableSnapshot {
+                identity: r.get(0)?,
+                file_name: r.get(1)?,
+                envelope: r.get(2)?,
+                source: r.get(3)?,
+                created_at: r.get(4)?,
+            })
+        })
+        .map_err(|e| format!("vault_read snapshots: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("vault_read snapshots: {e}"))?;
+
+    Ok(PortableVault {
+        meta,
+        projects,
+        snapshots,
+    })
+}
+
+/// Merge already-decrypted/re-encrypted rows in one transaction. Rows are
+/// matched by identity; duplicate snapshot content is skipped. No deletes of
+/// existing projects, and retention still applies.
+#[tauri::command]
+fn vault_import(payload: VaultImport) -> Result<VaultImportSummary, String> {
+    let mut conn = db()?;
+    portable_import(&mut conn, payload)
+}
+
+fn portable_import(
+    conn: &mut Connection,
+    payload: VaultImport,
+) -> Result<VaultImportSummary, String> {
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("vault_import: transaction: {e}"))?;
+
+    let mut ids: HashMap<String, String> = HashMap::new();
+    let mut projects_added = 0u64;
+    let mut projects_kept = 0u64;
+
+    for project in &payload.projects {
+        if project.identity.trim().is_empty() {
+            return Err("vault_import: project identity is required".to_string());
+        }
+        let inserted = tx
+            .execute(
+                "INSERT INTO projects (id, identity, display_name, folder_path, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT(identity) DO NOTHING",
+                params![
+                    new_id(),
+                    project.identity,
+                    project.display_name,
+                    project.folder_path,
+                    project.created_at
+                ],
+            )
+            .map_err(|e| format!("vault_import: project: {e}"))?;
+        if inserted > 0 {
+            projects_added += 1;
+        } else {
+            projects_kept += 1;
+        }
+        let id: String = tx
+            .query_row(
+                "SELECT id FROM projects WHERE identity = ?1",
+                params![project.identity],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("vault_import: project lookup: {e}"))?;
+        ids.insert(project.identity.clone(), id);
+    }
+
+    let mut snapshots_added = 0u64;
+    let mut snapshots_skipped = 0u64;
+    let mut retention: HashSet<(String, String)> = HashSet::new();
+
+    for snapshot in &payload.snapshots {
+        let Some(project_id) = ids.get(&snapshot.identity) else {
+            snapshots_skipped += 1;
+            continue;
+        };
+        let exists: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM snapshots
+                 WHERE project_id = ?1 AND file_name = ?2 AND plaintext_sha256 = ?3",
+                params![project_id, snapshot.file_name, snapshot.plaintext_sha256],
+                |r| r.get(0),
+            )
+            .map_err(|e| format!("vault_import: duplicate check: {e}"))?;
+        if exists > 0 {
+            snapshots_skipped += 1;
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO snapshots
+               (id, project_id, file_name, envelope, plaintext_sha256, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                new_id(),
+                project_id,
+                snapshot.file_name,
+                snapshot.envelope,
+                snapshot.plaintext_sha256,
+                snapshot.source,
+                snapshot.created_at
+            ],
+        )
+        .map_err(|e| format!("vault_import: snapshot: {e}"))?;
+        snapshots_added += 1;
+        retention.insert((project_id.clone(), snapshot.file_name.clone()));
+    }
+
+    for (project_id, file_name) in retention {
+        tx.execute(
+            "DELETE FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+               AND id NOT IN (
+                 SELECT id FROM snapshots
+                 WHERE project_id = ?1 AND file_name = ?2
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?3
+               )",
+            params![project_id, file_name, SNAPSHOT_RETENTION],
+        )
+        .map_err(|e| format!("vault_import: retention: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| format!("vault_import: commit: {e}"))?;
+    Ok(VaultImportSummary {
+        projects_added,
+        projects_kept,
+        snapshots_added,
+        snapshots_skipped,
+    })
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    fn test_dir() -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "env-manager-portable-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    fn local_vault(path: &Path) -> Connection {
+        let conn = Connection::open(path).expect("open temp vault");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn
+    }
+
+    fn payload(identity: &str, count: usize) -> VaultImport {
+        VaultImport {
+            projects: vec![ImportProject {
+                identity: identity.to_string(),
+                display_name: "Example".to_string(),
+                folder_path: "C:\\projects\\example".to_string(),
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            }],
+            snapshots: (0..count)
+                .map(|i| ImportSnapshot {
+                    identity: identity.to_string(),
+                    file_name: ".env".to_string(),
+                    envelope: format!("{{\"ciphertext\":\"{i}\"}}"),
+                    plaintext_sha256: format!("hash-{i}"),
+                    source: "import".to_string(),
+                    created_at: format!("2026-01-{:02}T00:00:00Z", i + 1),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn export_read_and_merge_with_retention() {
+        let dir = test_dir();
+        let source_path = dir.join("source.db");
+        let target_path = dir.join("target.db");
+        let portable_path = dir.join("portable.db");
+
+        {
+            let source = local_vault(&source_path);
+            source
+                .execute(
+                    "INSERT INTO projects
+                       (id, identity, display_name, folder_path, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        "p1",
+                        "github.com/foo/bar",
+                        "Example",
+                        "C:\\projects\\example",
+                        "2026-01-01T00:00:00Z"
+                    ],
+                )
+                .expect("project");
+            source
+                .execute(
+                    "INSERT INTO snapshots
+                       (id, project_id, file_name, envelope, plaintext_sha256, source, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        "s1",
+                        "p1",
+                        ".env",
+                        "{\"ciphertext\":\"abc\"}",
+                        "local-hash",
+                        "local",
+                        "2026-01-02T00:00:00Z"
+                    ],
+                )
+                .expect("snapshot");
+            let summary =
+                portable_export(&source, &portable_path, "salt-a", "machine-a", "2026-01-03T00:00:00Z")
+                    .expect("export");
+            assert_eq!((summary.projects, summary.snapshots), (1, 1));
+        }
+
+        let read = portable_read(&portable_path).expect("read");
+        assert_eq!(
+            read.meta.get("format").map(String::as_str),
+            Some("env-manager-vault")
+        );
+        assert_eq!(read.meta.get("salt").map(String::as_str), Some("salt-a"));
+        assert_eq!(read.projects.len(), 1);
+        assert_eq!(read.projects[0].identity, "github.com/foo/bar");
+        assert_eq!(read.snapshots.len(), 1);
+        assert_eq!(read.snapshots[0].envelope, "{\"ciphertext\":\"abc\"}");
+
+        {
+            let mut target = local_vault(&target_path);
+            let first = portable_import(&mut target, payload("github.com/foo/bar", 1))
+                .expect("first import");
+            assert_eq!(first.projects_added, 1);
+            assert_eq!(first.snapshots_added, 1);
+
+            let second = portable_import(&mut target, payload("github.com/foo/bar", 1))
+                .expect("repeat import");
+            assert_eq!(second.projects_kept, 1);
+            assert_eq!(second.snapshots_added, 0);
+            assert_eq!(second.snapshots_skipped, 1);
+
+            let third = portable_import(&mut target, payload("github.com/foo/bar", 26))
+                .expect("bulk import");
+            assert_eq!(third.snapshots_added, 25);
+            let kept: i64 = target
+                .query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE file_name = '.env'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("count");
+            assert_eq!(kept, SNAPSHOT_RETENTION);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +1260,9 @@ fn main() {
             snapshot_latest,
             snapshot_list,
             snapshot_delete,
+            vault_export,
+            vault_read,
+            vault_import,
             scan_env_projects,
             scan_cancel,
             links_read,

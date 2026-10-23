@@ -3,7 +3,7 @@
  * (TS-owned; Rust only reads/writes the file):
  *
  * {
- *   deviceName?: string,          // label written into bundle metadata
+ *   deviceName?: string,          // label written into vault-file metadata
  *   theme?: 'system' | 'light' | 'dark',
  *   cryptoSalt?: string,          // Argon2id salt from setupPassphrase
  *   recoveryBlob?: RecoveryBlob,  // sealed master key for code recovery
@@ -11,7 +11,7 @@
  * }
  *
  * Everything stays on this device. There is no hosted backend and no
- * account: sync happens through encrypted bundles the user moves by hand.
+ * account: sync happens through one encrypted vault file the user moves by hand.
  */
 
 import type { RecoveryBlob } from './crypto'
@@ -40,7 +40,7 @@ export async function saveConfig(patch: Partial<AppConfig>): Promise<AppConfig> 
 }
 
 /**
- * Device label for bundle metadata. A name the user set wins; otherwise
+ * Device label for vault-file metadata. A name the user set wins; otherwise
  * the OS hostname is adopted and saved so exports identify their origin
  * without manual setup. Never throws — falls back to a placeholder.
  */

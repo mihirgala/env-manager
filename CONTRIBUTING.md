@@ -8,11 +8,12 @@ protect that trust.
 - **Never commit real `.env` files, tokens, passphrases, or recovery codes.** Use fixtures under
   `src/lib/__fixtures__/` with fake values only (`EXAMPLE_KEY=example-value`). Don't add template
   env files to the repo.
-- Never commit `vault.db`, `*.envmgr` bundles, `*.backup-*`, or `src-tauri/target/`.
+- Never commit `vault.db`, exported vault `.db` files, `*.backup-*`, or `src-tauri/target/`.
 - Tests must use fixtures or temp dirs — never read/write real home or project `.env` files.
 - Logs and error messages must never print plaintext secrets. Log keys and hashes only.
 - The vault stores ciphertext envelopes plus `plaintext_sha256` for local conflict detection only.
-  Bundles contain ciphertext and **no hashes**. No plaintext columns or fields, ever.
+  Portable vault files contain ciphertext, project metadata, and the public salt — **no hashes** and
+  no plaintext columns or fields, ever.
 
 ## No lock-in
 
@@ -30,8 +31,8 @@ protect that trust.
 - **Zero-knowledge:** passphrase / master key / DEK / plaintext never leave the device, are never
   logged, and are never written to disk in plaintext. Envelopes are
   `{ v, salt, nonce, algo, ciphertext }`; no keys are stored.
-- **Portable identity:** DEKs derive from `identity:fileName`, not a local database id, so a bundle
-  decrypts on another machine. Monorepo identities use `identity::subpath`.
+- **Portable identity:** DEKs derive from `identity:fileName`, not a local database id, so a vault
+  file decrypts on another machine. Monorepo identities use `identity::subpath`.
 - **Conflicts:** never silently overwrite — show a diff, write `.env.backup-<ts>`, then apply.
 - **Dark mode:** check both themes at 360px before a PR. Use CSS variables, never hardcoded colors.
 - Load `.opencode/skills/repo-rules/SKILL.md` before touching vault, sync, crypto, dotenv, scan, or
@@ -53,5 +54,5 @@ TypeScript strict. Functional React components + hooks. Keep `src/lib` pure (no 
 
 ## Commit scope
 
-`pnpm test` and `pnpm build` green, no `.env` / `vault.db` / `*.envmgr` / `*.backup-*` /
-`src-tauri/target/` in the diff.
+`pnpm test` and `pnpm build` green, no `.env` / `vault.db` / exported vault `.db` /
+`*.backup-*` / `src-tauri/target/` in the diff.

@@ -10,12 +10,13 @@ metadata:
 
 # Repo Rules — env-manager
 
-Load this before touching vault, scan, bundle, crypto, dotenv parser, theme, or Tauri backend code.
+Load this before touching vault, scan, portable vault, crypto, dotenv parser, theme, or Tauri
+backend code.
 
 ## When to use me
 
-- Adding snapshot, bundle import/export, scan, or sync logic
-- Editing `src/lib` dotenv parser, identity, crypto, vault, store, bundle, scan, env-files, theme
+- Adding snapshot, portable vault import/export, scan, or sync logic
+- Editing `src/lib` dotenv parser, identity, crypto, vault, store, portable, scan, env-files, theme
 - Editing `src-tauri/` Rust commands
 - Writing tests with `.env` content
 - Changing shared UI surfaces or theme tokens
@@ -31,11 +32,12 @@ Load this before touching vault, scan, bundle, crypto, dotenv parser, theme, or 
 
 ## 2. Never commit secrets
 
-- [ ] No real `.env`, `vault.db`, `cache/`, `*.envmgr`, `*.backup-*`, tokens, or passphrases in git.
+- [ ] No real `.env`, `vault.db`, `cache/`, exported vault `.db`, `*.backup-*`, tokens, or
+  passphrases in git.
 - [ ] Fixtures use `EXAMPLE_KEY=example-value` placeholders only. No template env files.
 - [ ] Logs / errors never print plaintext secrets — redact values, log keys + hashes only.
 - [ ] `vault.db` envelope rows only: `{ v, salt, nonce, algo, ciphertext }` + local
-  `plaintext_sha256` for conflict detection. Bundles carry no hashes and no plaintext.
+  `plaintext_sha256` for conflict detection. Portable vault files carry no hashes and no plaintext.
 - [ ] Error messages may name a file or key, never a value.
 
 ## 3. Lossless dotenv
@@ -50,8 +52,8 @@ Load this before touching vault, scan, bundle, crypto, dotenv parser, theme, or 
 
 - [ ] `src-tauri/` allowed: fs read/write, `git remote get-url`, file stats, opaque SQLite rows,
   `links.json` / `config.json`, dialogs, read-only scan walk.
-- [ ] Forbidden in Rust: crypto, dotenv parsing, snapshot/restore policy, bundle format, env-file
-  filtering, theme decisions. Those live in `src/lib` (TS).
+- [ ] Forbidden in Rust: crypto, dotenv parsing, snapshot/restore policy, portable vault format/merge
+  policy, env-file filtering, theme decisions. Those live in `src/lib` (TS).
 - [ ] Every Tauri command has a TS adapter type so Vite `pnpm dev` works without Rust.
 
 ## 5. Zero-knowledge + identity
@@ -80,4 +82,4 @@ Load this before touching vault, scan, bundle, crypto, dotenv parser, theme, or 
 ## Fail the change if
 
 Any unchecked box above, `pnpm build` or `pnpm test` red, a real secret appears in the diff, any
-network call is added, or a plaintext env value appears in a store, log, or bundle.
+network call is added, or a plaintext env value appears in a store, log, or portable vault.

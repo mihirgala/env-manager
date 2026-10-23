@@ -1,18 +1,11 @@
 import { Check, Copy, Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
 import * as React from 'react'
-import { useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
-import {
-  buildBundle,
-  decryptBundle,
-  parseBundle,
-  serializeBundle,
-  type Bundle,
-} from '@/lib/bundle'
 import { isUnlocked } from '@/lib/crypto'
 import { effectiveValue, getValue, parse, serialize, setValue, type DotenvDocument } from '@/lib/dotenv'
 import { isTrackableEnvFile, trackableEnvFiles } from '@/lib/env-files'
@@ -41,12 +34,9 @@ import {
   pickSaveFile,
   readEnvFile,
   writeEnvFile,
-  type DialogFilter,
 } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import { cn } from '@/lib/utils'
-
-const BUNDLE_FILTERS: DialogFilter[] = [{ name: 'env-manager bundle', extensions: ['envmgr'] }]
 
 const statusVariant: Record<VaultStatus, 'success' | 'warning' | 'outline'> = {
   'backed-up': 'success',
@@ -115,15 +105,9 @@ function DiffSummary({ diff }: { diff: DiffPreview }): React.JSX.Element {
 }
 
 interface ImportPreviewState {
-  source: 'bundle' | 'plaintext'
   label: string
   files: Record<string, string>
   diffs: Record<string, DiffPreview>
-}
-
-interface PendingBundle {
-  bundle: Bundle
-  path: string
 }
 
 function targetFor(project: ProjectRecord, fileName: string): FileTarget {
@@ -138,7 +122,6 @@ function targetFor(project: ProjectRecord, fileName: string): FileTarget {
 export function ProjectDetailScreen(): React.JSX.Element {
   const { id } = useParams()
   const navigate = useNavigate()
-  const location = useLocation()
   const toast = useToast()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
   const sync = React.useMemo<SyncContext>(
@@ -166,11 +149,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
   const [restorePlan, setRestorePlan] = React.useState<RestorePlan | null>(null)
   const [importPreview, setImportPreview] = React.useState<ImportPreviewState | null>(null)
   const [importSelected, setImportSelected] = React.useState<Set<string>>(new Set())
-  const [pendingBundle, setPendingBundle] = React.useState<PendingBundle | null>(null)
-  const [bundlePassphrase, setBundlePassphrase] = React.useState('')
-  const [bundleError, setBundleError] = React.useState('')
-  const [bundleNeedsPassphrase, setBundleNeedsPassphrase] = React.useState(false)
-  const autoImportRef = React.useRef<string | null>(null)
 
   const unlocked = isUnlocked()
 
@@ -264,29 +242,17 @@ export function ProjectDetailScreen(): React.JSX.Element {
 
   // Escape closes whichever preview card is open.
   React.useEffect(() => {
-    if (restorePlan === null && importPreview === null && pendingBundle === null) return
+    if (restorePlan === null && importPreview === null) return
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         setRestorePlan(null)
         setImportPreview(null)
         setImportSelected(new Set())
-        setPendingBundle(null)
-        setBundleError('')
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [restorePlan, importPreview, pendingBundle])
-
-  // A settings-level bundle import routes here with the chosen path.
-  React.useEffect(() => {
-    const state = location.state as { bundlePath?: string } | null
-    const bundlePath = state?.bundlePath
-    if (project === null || bundlePath === undefined || autoImportRef.current === bundlePath) return
-    autoImportRef.current = bundlePath
-    navigate(location.pathname, { replace: true, state: null })
-    void handleImportBundle(bundlePath)
-  }, [project, location.state, location.pathname, navigate])
+  }, [restorePlan, importPreview])
 
   if (!isTauri()) {
     return (
@@ -387,7 +353,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
     }
     setActionBusy(true)
     setImportPreview(null)
-    setPendingBundle(null)
     try {
       const plan = await planRestore(sync, targetFor(project, file))
       if (plan === null) {
@@ -422,36 +387,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
     }
   }
 
-  async function handleExportBundle(): Promise<void> {
-    if (project === null) return
-    if (!isUnlocked()) {
-      toast('Unlock encryption to export an encrypted bundle.', 'error')
-      return
-    }
-    setActionBusy(true)
-    try {
-      const names = trackableEnvFiles(files)
-      if (names.length === 0) throw new Error('No trackable .env files to export.')
-      const path = await pickSaveFile(`${safeFileName(project.displayName)}.envmgr`, BUNDLE_FILTERS)
-      if (path === null) return
-      const contents: Record<string, string> = {}
-      for (const name of names) {
-        contents[name] = await readEnvFile(joinPath(project.folderPath, name))
-      }
-      const bundle = await buildBundle({
-        identity: project.identity,
-        displayName: project.displayName,
-        files: contents,
-      })
-      await writeEnvFile(path, serializeBundle(bundle))
-      toast('Encrypted bundle exported. Keep the passphrase that protects it.')
-    } catch (err) {
-      toast(err instanceof Error ? err.message : 'Bundle export failed', 'error')
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
   async function handleExportPlaintext(): Promise<void> {
     if (project === null) return
     try {
@@ -468,7 +403,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
   }
 
   async function openImportPreview(input: {
-    source: 'bundle' | 'plaintext'
     label: string
     files: Record<string, string>
   }): Promise<void> {
@@ -482,65 +416,8 @@ export function ProjectDetailScreen(): React.JSX.Element {
       if (!cleanDiff(diff)) selected.add(fileName)
     }
     setRestorePlan(null)
-    setPendingBundle(null)
-    setBundlePassphrase('')
-    setBundleError('')
-    setBundleNeedsPassphrase(false)
     setImportPreview({ ...input, diffs })
     setImportSelected(selected)
-  }
-
-  async function handleImportBundle(explicitPath?: string): Promise<void> {
-    if (project === null) return
-    if (!isUnlocked()) {
-      toast('Unlock encryption to import an encrypted bundle.', 'error')
-      return
-    }
-    setActionBusy(true)
-    setError('')
-    setRestorePlan(null)
-    setBundleError('')
-    try {
-      const path = explicitPath ?? (await pickOpenFile(BUNDLE_FILTERS))
-      if (path === null) return
-      const bundle = parseBundle(await readEnvFile(path))
-      if (bundle.project.identity !== project.identity) {
-        throw new Error(
-          `This bundle is for ${bundle.project.identity}, not ${project.identity}. Open that project (or add it) first.`,
-        )
-      }
-      setPendingBundle({ bundle, path })
-      try {
-        const files = await decryptBundle(bundle)
-        await openImportPreview({ source: 'bundle', label: bundle.project.displayName, files })
-      } catch (err) {
-        setBundleNeedsPassphrase(true)
-        setBundleError(err instanceof Error ? err.message : 'Could not decrypt the bundle')
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Bundle import failed')
-    } finally {
-      setActionBusy(false)
-    }
-  }
-
-  async function handleDecryptPendingBundle(): Promise<void> {
-    if (pendingBundle === null) return
-    setActionBusy(true)
-    setBundleError('')
-    try {
-      const files = await decryptBundle(pendingBundle.bundle, { passphrase: bundlePassphrase })
-      await openImportPreview({
-        source: 'bundle',
-        label: pendingBundle.bundle.project.displayName,
-        files,
-      })
-    } catch (err) {
-      setBundleNeedsPassphrase(true)
-      setBundleError(err instanceof Error ? err.message : 'Wrong passphrase or corrupted bundle')
-    } finally {
-      setActionBusy(false)
-    }
   }
 
   async function handleImportPlaintext(): Promise<void> {
@@ -560,7 +437,7 @@ export function ProjectDetailScreen(): React.JSX.Element {
         throw new Error('Only .env files can be imported (templates and backups are ignored).')
       }
       const text = await readEnvFile(path)
-      await openImportPreview({ source: 'plaintext', label: fileName, files: { [fileName]: text } })
+      await openImportPreview({ label: fileName, files: { [fileName]: text } })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Plaintext import failed')
     } finally {
@@ -609,13 +486,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
     )
   }
 
-  function cancelBundle(): void {
-    setPendingBundle(null)
-    setBundleError('')
-    setBundlePassphrase('')
-    setBundleNeedsPassphrase(false)
-  }
-
   async function handleRemove(): Promise<void> {
     if (project === null) return
     if (!window.confirm(`Unlink "${project.displayName}"? Your .env files stay on disk.`)) return
@@ -655,8 +525,8 @@ export function ProjectDetailScreen(): React.JSX.Element {
 
       {!unlocked && (
         <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          Locked — editing and saving still work. Unlock encryption to back up, restore, or
-          import/export encrypted bundles.
+          Locked — editing and saving still work. Unlock encryption to back up, restore, or import
+          with a snapshot.
         </p>
       )}
 
@@ -725,58 +595,13 @@ export function ProjectDetailScreen(): React.JSX.Element {
         </Card>
       )}
 
-      {pendingBundle !== null && importPreview === null && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Bundle passphrase</CardTitle>
-            <CardDescription>
-              This bundle was encrypted with another passphrase. It is decrypted in memory only;
-              nothing is written until you confirm the diff.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-col gap-3">
-            {bundleNeedsPassphrase && (
-              <Input
-                type="password"
-                autoComplete="off"
-                aria-label="Bundle passphrase"
-                placeholder="Passphrase for this bundle"
-                value={bundlePassphrase}
-                onChange={(e) => setBundlePassphrase(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && bundlePassphrase !== '') void handleDecryptPendingBundle()
-                }}
-              />
-            )}
-            {bundleError !== '' && (
-              <p role="alert" className="text-sm text-destructive">
-                {bundleError}
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                onClick={handleDecryptPendingBundle}
-                disabled={!bundleNeedsPassphrase || bundlePassphrase === '' || actionBusy}
-              >
-                {actionBusy ? 'Decrypting…' : 'Decrypt bundle'}
-              </Button>
-              <Button type="button" variant="outline" onClick={cancelBundle}>
-                Cancel
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {importPreview !== null && (
         <Card>
           <CardHeader>
             <CardTitle>Import {importPreview.label}</CardTitle>
             <CardDescription>
-              {importPreview.source === 'bundle'
-                ? 'Decrypted in memory. Selected files are backed up to .env.backup-<ts> before writing and recorded as an import snapshot.'
-                : 'Plaintext file. The target is backed up before writing and recorded as an import snapshot.'}
+              Plaintext file. The target is backed up to .env.backup-&lt;ts&gt; before writing and
+              recorded as an import snapshot.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
@@ -951,12 +776,6 @@ export function ProjectDetailScreen(): React.JSX.Element {
         </Button>
         <Button type="button" variant="outline" onClick={handlePlanRestore} disabled={cryptoDisabled}>
           Restore…
-        </Button>
-        <Button type="button" variant="secondary" onClick={handleExportBundle} disabled={cryptoDisabled}>
-          Export bundle…
-        </Button>
-        <Button type="button" variant="secondary" onClick={() => void handleImportBundle()} disabled={cryptoDisabled}>
-          Import bundle…
         </Button>
         <Button
           type="button"

@@ -16,6 +16,27 @@ interface SidebarContextValue {
 
 const SidebarContext = React.createContext<SidebarContextValue | null>(null)
 
+const SIDEBAR_STORAGE_KEY = 'env-manager.sidebar-open'
+
+/** Remember the desktop rail state across reloads. Storage may be unavailable. */
+function readStoredOpen(fallback: boolean): boolean {
+  if (typeof window === 'undefined') return fallback
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_STORAGE_KEY)
+    return raw === null ? fallback : raw === 'true'
+  } catch {
+    return fallback
+  }
+}
+
+function storeOpen(open: boolean): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_STORAGE_KEY, String(open))
+  } catch {
+    // Private mode / disabled storage — the in-memory state still works.
+  }
+}
+
 export function useSidebar(): SidebarContextValue {
   const ctx = React.useContext(SidebarContext)
   if (ctx === null) throw new Error('useSidebar must be used within a SidebarProvider')
@@ -55,13 +76,16 @@ export function SidebarProvider({
   ...props
 }: SidebarProviderProps): React.JSX.Element {
   const isMobile = useIsMobile()
-  const [internalOpen, setInternalOpen] = React.useState(defaultOpen)
+  const [internalOpen, setInternalOpen] = React.useState(() => readStoredOpen(defaultOpen))
   const [openMobile, setOpenMobile] = React.useState(false)
 
   const open = openProp ?? internalOpen
   const setOpen = React.useCallback(
     (value: boolean) => {
-      if (openProp === undefined) setInternalOpen(value)
+      if (openProp === undefined) {
+        setInternalOpen(value)
+        storeOpen(value)
+      }
       onOpenChange?.(value)
     },
     [openProp, onOpenChange],
@@ -166,22 +190,46 @@ export function Sidebar({
   )
 }
 
+function useCollapsedRail(): boolean {
+  const { state, isMobile } = useSidebar()
+  return state === 'collapsed' && !isMobile
+}
+
 export function SidebarHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
-  return <div data-slot="sidebar-header" className={cn('flex flex-col gap-2 p-2', className)} {...props} />
+  const collapsed = useCollapsedRail()
+  return (
+    <div
+      data-slot="sidebar-header"
+      className={cn('flex flex-col gap-2 p-2', collapsed && 'px-0', className)}
+      {...props}
+    />
+  )
 }
 
 export function SidebarContent({ className, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
+  const collapsed = useCollapsedRail()
   return (
     <div
       data-slot="sidebar-content"
-      className={cn('flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2 pt-0', className)}
+      className={cn(
+        'flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2 pt-0',
+        collapsed && 'px-0',
+        className,
+      )}
       {...props}
     />
   )
 }
 
 export function SidebarFooter({ className, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
-  return <div data-slot="sidebar-footer" className={cn('flex flex-col gap-1 p-2', className)} {...props} />
+  const collapsed = useCollapsedRail()
+  return (
+    <div
+      data-slot="sidebar-footer"
+      className={cn('flex flex-col gap-1 p-2', collapsed && 'px-0', className)}
+      {...props}
+    />
+  )
 }
 
 export function SidebarGroup({ className, ...props }: React.HTMLAttributes<HTMLDivElement>): React.JSX.Element {
@@ -293,11 +341,13 @@ export function SidebarInset({ className, ...props }: React.HTMLAttributes<HTMLD
 }
 
 export function SidebarTrigger({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>): React.JSX.Element {
-  const { toggle } = useSidebar()
+  const { toggle, state, isMobile, openMobile } = useSidebar()
+  const expanded = isMobile ? openMobile : state === 'expanded'
   return (
     <button
       type="button"
-      aria-label="Toggle sidebar"
+      aria-label={expanded ? 'Collapse sidebar' : 'Expand sidebar'}
+      aria-expanded={expanded}
       onClick={toggle}
       className={cn(
         'inline-flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-lg transition-colors',
