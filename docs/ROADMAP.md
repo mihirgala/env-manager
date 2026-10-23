@@ -63,7 +63,7 @@ has no network calls, no accounts, and no server.
 - [x] Parent-folder scan (read-only) + bulk add
 - [x] Vault-only screens: status, back up, restore diff, import/export
 - [x] System / Light / Dark theme with no-flash boot
-- [ ] Packaging + CI (Windows/macOS/Linux, unsigned)
+- [x] Packaging + CI (Windows/macOS/Linux, unsigned)
 - [ ] Acceptance pass at 360px / 1280px in both themes
 
 ## Open-source chores (anytime)

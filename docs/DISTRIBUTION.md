@@ -35,6 +35,17 @@ pnpm tauri build
 
 Artifacts land in `src-tauri/target/release/bundle/`. Nothing from `src-tauri/target/` is committed.
 
+## Icons
+
+`public/favicon.svg` is the source logo. Regenerate all platform icon sizes from it after a logo
+change:
+
+```powershell
+pnpm tauri icon public/favicon.svg --fit contain
+```
+
+This refreshes `src-tauri/icons/` (Windows, macOS, Linux, plus the mobile icon sets).
+
 ## macOS universal build
 
 ```bash
@@ -81,15 +92,17 @@ find src-tauri/target/release/bundle -type f -exec shasum -a 256 {} \; > SHA256S
 
 Attach `SHA256SUMS.txt` to the release and paste the hashes into the release notes.
 
-## CI outline
+## CI workflow
 
-Planned workflow: `.github/workflows/release.yml`
+`.github/workflows/release.yml` builds all three platforms:
 
 - Trigger: tag `v*` plus manual dispatch.
-- Matrix: `windows-latest`, `macos-14`, `ubuntu-22.04`.
+- Matrix: `windows-latest`, `macos-latest`, `ubuntu-22.04`.
 - Steps: checkout → pnpm + Node → Rust toolchain → platform deps → `pnpm test` →
-  `pnpm build` → `tauri-apps/tauri-action` → upload artifacts → draft release.
-- macOS builds `--target universal-apple-darwin`; install both Rust targets first.
+  `tauri-apps/tauri-action` → upload artifacts.
+- **Tag push:** creates a **draft** GitHub release with the installers attached.
+- **Manual dispatch:** builds the same artifacts and uploads them as workflow artifacts (no release).
+- macOS builds `--target universal-apple-darwin`; both Rust targets are installed first.
 - Linux installs WebKitGTK + AppIndicator deps before building.
 - No signing configuration in 0.1.0. Leave signing env vars unset so Tauri produces unsigned
   artifacts.
@@ -99,11 +112,12 @@ Planned workflow: `.github/workflows/release.yml`
 Do not add certificates, private keys, or passwords to the repo. When signing is enabled, inject
 these through CI secrets and document which are enabled in the release notes:
 
-- Apple: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`,
-  `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`
-- Windows: `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD`
-- Tauri updater (post-0.1.0): `TAURI_SIGNING_PRIVATE_KEY`,
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`
+- macOS: the workflow already maps `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+  `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+- Windows Authenticode: add a certificate-import step and a `certificateThumbprint` or
+  `signCommand` in the bundle config. Keep the PFX and password in CI secrets.
+- Tauri updater (post-0.1.0): the workflow maps `TAURI_SIGNING_PRIVATE_KEY` and
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`; `createUpdaterArtifacts` is `false` for 0.1.0.
 
 Never commit keystores, p12 files, provisioning profiles, or generated signatures.
 

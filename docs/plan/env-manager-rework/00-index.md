@@ -85,7 +85,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 6. Screens rewiring
 - [x] 7. Dark mode
 - [x] 8. Skills + docs
-- [ ] 9. Packaging + CI
+- [x] 9. Packaging + CI
 - [ ] 10. Verification
 
 ## Progress log
@@ -134,6 +134,15 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   installs, signing vars, checksums, release checklist, CI outline). Doc grep for
   supabase/rls/keychain/npm run/npx vitest/template env files is zero; `pnpm test` (70) +
   `pnpm build` green.
+- **2026-10-23 — step 9 done.** `tauri.conf.json` now pins `msi, nsis, dmg, app, appimage, deb,
+  rpm`, DeveloperTool metadata, macOS 10.15, Linux deb deps, per-user NSIS, and
+  `createUpdaterArtifacts: false`; removed unused `withGlobalTauri`. Replaced the placeholder
+  icons with the real logo (sanitized SVG + padding, generated with `pnpm tauri icon
+  public/favicon.svg --fit contain`). Added `.github/workflows/release.yml` (tag + manual
+  dispatch, Windows/macOS universal/Ubuntu matrix, tests, draft release, artifact fallback,
+  secret-gated signing hooks), updated `docs/DISTRIBUTION.md` and `.gitignore`. Workflow YAML
+  parses; `pnpm test` (70) + `pnpm build` green. Local `pnpm tauri build` could not run
+  (rustc/cargo + MSVC build tools absent), so installer smoke-testing remains CI/manual.
 
 ## Environment notes
 
