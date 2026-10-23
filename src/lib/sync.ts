@@ -1,43 +1,24 @@
 /**
- * Encrypted snapshot engine — pure TS over an injected storage client and
- * injected file IO, so every path is unit-testable. The client is a local
- * store; nothing here touches a network.
+ * Encrypted snapshot engine — pure TS over an injected snapshot store and
+ * injected file IO, so every path is unit-testable. The store is local
+ * (`~/.env-manager/vault.db`); nothing here touches a network.
  *
- * Rules (repo guardrails): push/pull show a diff preview and never silently
- * overwrite — on conflict the caller writes `.env.backup-<ts>` first.
- * Plaintext / keys never leave this module except into the caller's files.
+ * Rules (repo guardrails): restore shows a diff preview and never silently
+ * overwrites — it writes `.env.backup-<ts>` first. Plaintext / keys never
+ * leave this module except into the caller's files.
  */
 
-import { decryptFile, encryptFile, type CryptoEnvelope } from './crypto'
-import { getValue, parse } from './dotenv'
+import { decryptFile, encryptFile, isUnlocked } from './crypto'
+import { effectiveValue, parse } from './dotenv'
 import { sha256Hex } from './hash'
+import type { SnapshotSource, SnapshotStore } from './store'
 
-export type SyncStatus = 'clean' | 'behind' | 'ahead' | 'diverged' | 'local-only'
+export type VaultStatus = 'locked' | 'not-backed-up' | 'backed-up' | 'changed'
 
 export interface DiffPreview {
   added: string[]
   removed: string[]
   changed: string[]
-}
-
-export interface CloudProject {
-  id: string
-  identity: string
-  displayName: string | null
-}
-
-export interface CloudSnapshot {
-  envelope: CryptoEnvelope
-  plaintextSha256: string
-  deviceName: string | null
-  createdAt: string
-}
-
-export interface CloudClient {
-  listProjects(): Promise<CloudProject[]>
-  upsertProject(identity: string, displayName: string): Promise<CloudProject>
-  latestSnapshot(projectId: string): Promise<CloudSnapshot | null>
-  pushSnapshot(projectId: string, snap: Omit<CloudSnapshot, 'createdAt'>): Promise<void>
 }
 
 export interface FileIO {
@@ -51,16 +32,18 @@ export function fileNameOf(path: string): string {
   return path.split(/[\\/]/).pop() ?? '.env'
 }
 
-/** Key-level diff between local plaintext and decrypted remote plaintext. */
+function keyValues(text: string): Map<string, string> {
+  const values = new Map<string, string>()
+  for (const entry of parse(text).entries) {
+    if (entry.type === 'pair') values.set(entry.key, effectiveValue(entry))
+  }
+  return values
+}
+
+/** Key-level diff between local plaintext and decrypted snapshot plaintext. */
 export function previewDiff(localText: string, remoteText: string): DiffPreview {
-  const localKeys = new Map<string, string>()
-  for (const e of parse(localText).entries) {
-    if (e.type === 'pair') localKeys.set(e.key, getValue(parse(localText), e.key) ?? '')
-  }
-  const remoteKeys = new Map<string, string>()
-  for (const e of parse(remoteText).entries) {
-    if (e.type === 'pair') remoteKeys.set(e.key, getValue(parse(remoteText), e.key) ?? '')
-  }
+  const localKeys = keyValues(localText)
+  const remoteKeys = keyValues(remoteText)
   const added: string[] = []
   const removed: string[] = []
   const changed: string[] = []
@@ -79,82 +62,93 @@ function isCleanDiff(d: DiffPreview): boolean {
 }
 
 export interface SyncContext {
-  cloud: CloudClient
+  store: SnapshotStore
   io: FileIO
-  /** Last stored sha we successfully pushed/pulled. */
-  lastSyncedSha: string | null
+}
+
+async function readIfPresent(io: FileIO, path: string): Promise<{ text: string; exists: boolean }> {
+  try {
+    return { text: await io.readFile(path), exists: true }
+  } catch {
+    return { text: '', exists: false }
+  }
+}
+
+export interface FileTarget {
+  projectId: string
+  identity: string
+  filePath: string
+  fileName: string
 }
 
 /**
- * Push: encrypt local file → store envelope + sha.
- * Returns the new sha. Throws when locked (crypto) or missing (storage).
+ * Back up: read file → sha → encrypt under `identity:fileName` → append row.
+ * Throws while locked (crypto) — callers keep the disk write independent.
  */
-export async function pushProject(
+export async function backupToVault(
   ctx: SyncContext,
-  opts: { identity: string; displayName: string; filePath: string; deviceName: string },
+  opts: FileTarget,
 ): Promise<{ sha256: string }> {
-  const localText = await ctx.io.readFile(opts.filePath)
-  const sha = await sha256Hex(localText)
-  const envelope = await encryptFile(opts.identity, fileNameOf(opts.filePath), localText)
-  const project = await ctx.cloud.upsertProject(opts.identity, opts.displayName)
-  await ctx.cloud.pushSnapshot(project.id, {
+  const text = await ctx.io.readFile(opts.filePath)
+  const sha256 = await sha256Hex(text)
+  const envelope = await encryptFile(opts.identity, opts.fileName, text)
+  await ctx.store.put({
+    projectId: opts.projectId,
+    fileName: opts.fileName,
     envelope,
-    plaintextSha256: sha,
-    deviceName: opts.deviceName,
+    plaintextSha256: sha256,
+    source: 'local',
   })
-  return { sha256: sha }
+  return { sha256 }
 }
 
-export interface PullPlan {
+export interface RestorePlan {
   diff: DiffPreview
   conflict: boolean
-  remoteSha256: string
+  snapshotAt: string
+  source: SnapshotSource
+  sha256: string
 }
 
 /**
- * Pull: download + decrypt, compare with local, report a plan.
- * Applying the plan (backup + write) is the caller's explicit step —
- * see `applyPull` — so nothing is ever silently overwritten.
+ * Plan a restore: decrypt the latest snapshot and compare it with disk.
+ * Applying is the caller's explicit step — see `applyRestore` — so nothing
+ * is ever silently overwritten.
  */
-export async function planPull(
+export async function planRestore(
   ctx: SyncContext,
-  opts: { identity: string; filePath: string },
-): Promise<PullPlan | null> {
-  const projects = await ctx.cloud.listProjects()
-  const match = projects.find((p) => p.identity === opts.identity)
-  if (match === undefined) return null
-  const snap = await ctx.cloud.latestSnapshot(match.id)
+  opts: FileTarget,
+): Promise<RestorePlan | null> {
+  const snap = await ctx.store.latest(opts.projectId, opts.fileName)
   if (snap === null) return null
-  const remoteText = await decryptFile(opts.identity, fileNameOf(opts.filePath), snap.envelope)
-  let localText = ''
-  try {
-    localText = await ctx.io.readFile(opts.filePath)
-  } catch {
-    localText = ''
-  }
-  const localSha = await sha256Hex(localText)
-  const diff = previewDiff(localText, remoteText)
-  // Conflict = local edits exist that the cloud doesn't know about.
+  const storedText = await decryptFile(opts.identity, opts.fileName, snap.envelope)
+  const local = await readIfPresent(ctx.io, opts.filePath)
+  const diff = previewDiff(local.text, storedText)
+  // Local edits exist that the latest snapshot does not know about.
   const conflict =
-    localText !== '' &&
-    localSha !== snap.plaintextSha256 &&
-    !isCleanDiff(diff) &&
-    ctx.lastSyncedSha !== null &&
-    localSha !== ctx.lastSyncedSha
-  return { diff, conflict, remoteSha256: snap.plaintextSha256 }
+    local.exists &&
+    (await sha256Hex(local.text)) !== snap.plaintextSha256 &&
+    !isCleanDiff(diff)
+  return {
+    diff,
+    conflict,
+    snapshotAt: snap.createdAt,
+    source: snap.source,
+    sha256: snap.plaintextSha256,
+  }
 }
 
-/** Explicit apply step: backup the local file, then write the decrypted remote text. */
-export async function applyPull(
+/**
+ * Apply the latest snapshot: back up the existing file, write decrypted
+ * text, then record a fresh local snapshot so status returns to `backed-up`.
+ */
+export async function applyRestore(
   ctx: SyncContext,
-  opts: { identity: string; filePath: string },
+  opts: FileTarget,
 ): Promise<{ backupPath: string | null; sha256: string }> {
-  const projects = await ctx.cloud.listProjects()
-  const match = projects.find((p) => p.identity === opts.identity)
-  if (match === undefined) throw new Error('sync: project not found in the store')
-  const snap = await ctx.cloud.latestSnapshot(match.id)
-  if (snap === null) throw new Error('sync: no stored snapshot')
-  const remoteText = await decryptFile(opts.identity, fileNameOf(opts.filePath), snap.envelope)
+  const snap = await ctx.store.latest(opts.projectId, opts.fileName)
+  if (snap === null) throw new Error('sync: no stored snapshot to restore')
+  const storedText = await decryptFile(opts.identity, opts.fileName, snap.envelope)
   let backupPath: string | null = null
   try {
     await ctx.io.readFile(opts.filePath)
@@ -162,32 +156,28 @@ export async function applyPull(
   } catch {
     backupPath = null
   }
-  // Lossless application: remote text is already a complete dotenv document.
-  await ctx.io.writeFile(opts.filePath, remoteText)
-  return { backupPath, sha256: snap.plaintextSha256 }
+  // Lossless application: the snapshot is a complete dotenv document.
+  await ctx.io.writeFile(opts.filePath, storedText)
+  const sha256 = await sha256Hex(storedText)
+  await ctx.store.put({
+    projectId: opts.projectId,
+    fileName: opts.fileName,
+    envelope: snap.envelope,
+    plaintextSha256: sha256,
+    source: 'local',
+  })
+  return { backupPath, sha256 }
 }
 
+/** `locked` | `not-backed-up` | `backed-up` | `changed` — exactly four states. */
 export async function projectStatus(
   ctx: SyncContext,
-  opts: { identity: string; filePath: string; localOnly: boolean },
-): Promise<SyncStatus> {
-  if (opts.localOnly) return 'local-only'
-  let localText = ''
-  try {
-    localText = await ctx.io.readFile(opts.filePath)
-  } catch {
-    return 'clean'
-  }
-  const localSha = await sha256Hex(localText)
-  const projects = await ctx.cloud.listProjects().catch(() => null)
-  if (projects === null) return 'clean'
-  const match = projects.find((p) => p.identity === opts.identity)
-  if (match === undefined) return ctx.lastSyncedSha === null ? 'clean' : 'ahead'
-  const snap = await ctx.cloud.latestSnapshot(match.id).catch(() => null)
-  if (snap === null) return 'ahead'
-  if (localSha === snap.plaintextSha256) return 'clean'
-  if (ctx.lastSyncedSha === null) return 'diverged'
-  if (ctx.lastSyncedSha === snap.plaintextSha256) return 'ahead'
-  if (ctx.lastSyncedSha === localSha) return 'behind'
-  return 'diverged'
+  opts: FileTarget,
+): Promise<VaultStatus> {
+  if (!isUnlocked()) return 'locked'
+  const snap = await ctx.store.latest(opts.projectId, opts.fileName)
+  if (snap === null) return 'not-backed-up'
+  const local = await readIfPresent(ctx.io, opts.filePath)
+  if (!local.exists) return 'changed'
+  return (await sha256Hex(local.text)) === snap.plaintextSha256 ? 'backed-up' : 'changed'
 }

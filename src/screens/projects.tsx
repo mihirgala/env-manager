@@ -2,18 +2,18 @@ import { Link } from 'react-router-dom'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { useToast } from '@/components/toaster'
-import { sha256Hex } from '@/lib/hash'
+import { createTauriStore } from '@/lib/store'
+import { projectStatus, type SyncContext, type VaultStatus } from '@/lib/sync'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
-import { isTauri, readEnvFile } from '@/lib/tauri'
+import { backupEnvFile, isTauri, listEnvFiles, readEnvFile, writeEnvFile } from '@/lib/tauri'
 import { loadConfig, saveConfig } from '@/lib/config'
 import * as React from 'react'
 
-type RowStatus = 'clean' | 'diverged' | 'unknown'
-
-const statusVariant: Record<RowStatus, 'success' | 'warning' | 'outline' | 'destructive'> = {
-  clean: 'success',
-  diverged: 'destructive',
-  unknown: 'outline',
+const statusVariant: Record<VaultStatus, 'success' | 'warning' | 'outline' | 'destructive'> = {
+  'backed-up': 'success',
+  changed: 'warning',
+  'not-backed-up': 'outline',
+  locked: 'outline',
 }
 
 export function ProjectsScreen(): React.JSX.Element {
@@ -21,7 +21,7 @@ export function ProjectsScreen(): React.JSX.Element {
   const [projects, setProjects] = React.useState<ProjectRecord[] | null>(null)
   const [failed, setFailed] = React.useState(false)
   const [showOnboarding, setShowOnboarding] = React.useState(false)
-  const [statuses, setStatuses] = React.useState<Record<string, RowStatus>>({})
+  const [statuses, setStatuses] = React.useState<Record<string, VaultStatus>>({})
 
   React.useEffect(() => {
     let cancelled = false
@@ -30,24 +30,29 @@ export function ProjectsScreen(): React.JSX.Element {
       .listProjects()
       .then(async (rows) => {
         if (cancelled) return
-        // Local status only: stored sha vs. what is on disk right now.
+        // Vault status over the first trackable file: `.env` when present,
+        // otherwise the first `.env.*` (the detail screen picks the rest).
+        const ctx: SyncContext = {
+          store: createTauriStore(),
+          io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+        }
         const withStatus = await Promise.all(
           rows.map(async (p) => {
+            const found = await listEnvFiles(p.folderPath).catch(() => ['.env'] as string[])
+            const names = found.length > 0 ? found : ['.env']
+            const fileName = names.includes('.env') ? '.env' : (names[0] ?? '.env')
             const sep = p.folderPath.includes('/') ? '/' : '\\'
-            const file = `${p.folderPath.replace(/[\\/]+$/, '')}${sep}.env`
+            const filePath = `${p.folderPath.replace(/[\\/]+$/, '')}${sep}${fileName}`
             try {
-              const sets = await vault.listEnvSets(p.id)
-              const main = sets.find((s) => s.fileName === '.env') ?? sets[0]
-              const content = await readEnvFile(file)
-              const sha = await sha256Hex(content)
-              return {
-                p,
-                status: (main !== undefined && main.sha256 !== '' && main.sha256 !== sha
-                  ? 'diverged'
-                  : 'clean') as RowStatus,
-              }
+              const status = await projectStatus(ctx, {
+                projectId: p.id,
+                identity: p.identity,
+                filePath,
+                fileName,
+              })
+              return { p, status }
             } catch {
-              return { p, status: 'unknown' as RowStatus }
+              return { p, status: 'not-backed-up' as VaultStatus }
             }
           }),
         )
@@ -162,7 +167,7 @@ export function ProjectsScreen(): React.JSX.Element {
             >
               <span className="flex flex-wrap items-center gap-2">
                 <span className="mr-auto min-w-0 truncate font-medium">{p.displayName}</span>
-                <Badge variant={statusVariant[statuses[p.id] ?? 'unknown']}>
+                <Badge variant={statusVariant[statuses[p.id] ?? 'not-backed-up']}>
                   {statuses[p.id] ?? '…'}
                 </Badge>
               </span>

@@ -31,16 +31,18 @@ export interface ProjectRow {
   identity: string
   displayName: string
   folderPath: string
-  localOnly: boolean
   createdAt: string
 }
 
-export interface EnvSetRow {
+/** Opaque snapshot row as stored in SQLite (`envelope` is JSON text). */
+export interface SnapshotWire {
   id: string
   projectId: string
   fileName: string
-  sha256: string
-  updatedAt: string
+  envelope: string
+  plaintextSha256: string
+  source: 'local' | 'import'
+  createdAt: string
 }
 
 export interface FileStat {
@@ -108,20 +110,33 @@ export async function projectRemove(id: string): Promise<void> {
   await invoke('project_remove', { id })
 }
 
-export async function projectSetLocalOnly(id: string, localOnly: boolean): Promise<void> {
-  await invoke('project_set_local_only', { id, localOnly })
-}
-
-export async function envsetUpsert(input: {
+export async function snapshotPut(input: {
   projectId: string
   fileName: string
-  sha256: string
-}): Promise<EnvSetRow> {
-  return invoke<EnvSetRow>('envset_upsert', input)
+  envelope: string
+  plaintextSha256: string
+  source: 'local' | 'import'
+}): Promise<SnapshotWire> {
+  return invoke<SnapshotWire>('snapshot_put', input)
 }
 
-export async function envsetList(projectId: string): Promise<EnvSetRow[]> {
-  return invoke<EnvSetRow[]>('envset_list', { projectId })
+export async function snapshotLatest(
+  projectId: string,
+  fileName: string,
+): Promise<SnapshotWire | null> {
+  return invoke<SnapshotWire | null>('snapshot_latest', { projectId, fileName })
+}
+
+export async function snapshotList(
+  projectId: string,
+  fileName: string,
+  limit = 20,
+): Promise<SnapshotWire[]> {
+  return invoke<SnapshotWire[]>('snapshot_list', { projectId, fileName, limit })
+}
+
+export async function snapshotDelete(id: string): Promise<void> {
+  await invoke('snapshot_delete', { id })
 }
 
 export async function linksRead(): Promise<Record<string, string>> {

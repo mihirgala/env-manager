@@ -1,11 +1,11 @@
 /**
- * Local vault — P1. Pure TS client over a storage driver.
+ * Local vault — project rows only. Pure TS client over a storage driver.
  *
  * The default driver calls the Tauri backend (SQLite `~/.env-manager/vault.db`
  * + `links.json`), so this module keeps zero Tauri imports and stays
  * testable with the in-memory driver. Nothing is ever written into target
  * user repos; `removeProject` unlinks vault rows only and leaves `.env`
- * files intact.
+ * files intact. Encrypted snapshots live in `./store`.
  */
 
 import * as tauri from './tauri'
@@ -16,17 +16,7 @@ export interface ProjectRecord {
   identity: string
   displayName: string
   folderPath: string
-  localOnly: boolean
   createdAt: string
-}
-
-export interface EnvSetRecord {
-  id: string
-  projectId: string
-  /** e.g. `.env`, `.env.local` (multi-file sets land in P3). */
-  fileName: string
-  sha256: string
-  updatedAt: string
 }
 
 export interface VaultDriver {
@@ -34,9 +24,6 @@ export interface VaultDriver {
   projectList(): Promise<ProjectRecord[]>
   projectGet(id: string): Promise<ProjectRecord | null>
   projectRemove(id: string): Promise<void>
-  projectSetLocalOnly(id: string, localOnly: boolean): Promise<void>
-  envsetUpsert(input: { projectId: string; fileName: string; sha256: string }): Promise<EnvSetRecord>
-  envsetList(projectId: string): Promise<EnvSetRecord[]>
 }
 
 export class Vault {
@@ -64,25 +51,11 @@ export class Vault {
   removeProject(id: string): Promise<void> {
     return this.driver.projectRemove(id)
   }
-
-  async setLocalOnly(id: string, localOnly: boolean): Promise<ProjectRecord | null> {
-    await this.driver.projectSetLocalOnly(id, localOnly)
-    return this.driver.projectGet(id)
-  }
-
-  recordEnvSet(projectId: string, fileName: string, sha256: string): Promise<EnvSetRecord> {
-    return this.driver.envsetUpsert({ projectId, fileName, sha256 })
-  }
-
-  listEnvSets(projectId: string): Promise<EnvSetRecord[]> {
-    return this.driver.envsetList(projectId)
-  }
 }
 
 /** In-memory driver for tests and `pnpm dev` without Tauri. */
 export function createMemoryDriver(): VaultDriver & { projects: ProjectRecord[] } {
   const projects: ProjectRecord[] = []
-  const envSets: EnvSetRecord[] = []
   let n = 0
   const nextId = (): string => `mem-${++n}`
 
@@ -90,14 +63,12 @@ export function createMemoryDriver(): VaultDriver & { projects: ProjectRecord[] 
     projects,
     async projectAdd(input) {
       const existing = projects.find((p) => p.identity === input.identity)
-      if (existing !== undefined) {
-        existing.folderPath = input.folderPath
-        return existing
-      }
+      // Duplicate identities keep their original folder — re-pointing would
+      // move snapshots to the wrong repo (the scan UI explains duplicates).
+      if (existing !== undefined) return existing
       const row: ProjectRecord = {
         id: nextId(),
         createdAt: new Date(0).toISOString(),
-        localOnly: false,
         ...input,
       }
       projects.push(row)
@@ -112,32 +83,6 @@ export function createMemoryDriver(): VaultDriver & { projects: ProjectRecord[] 
     async projectRemove(id) {
       const i = projects.findIndex((p) => p.id === id)
       if (i !== -1) projects.splice(i, 1)
-      for (let j = envSets.length - 1; j >= 0; j--) {
-        if (envSets[j]?.projectId === id) envSets.splice(j, 1)
-      }
-    },
-    async projectSetLocalOnly(id, localOnly) {
-      const row = projects.find((p) => p.id === id)
-      if (row !== undefined) row.localOnly = localOnly
-    },
-    async envsetUpsert(input) {
-      const existing = envSets.find(
-        (e) => e.projectId === input.projectId && e.fileName === input.fileName,
-      )
-      if (existing !== undefined) {
-        existing.sha256 = input.sha256
-        return existing
-      }
-      const row: EnvSetRecord = {
-        id: nextId(),
-        updatedAt: new Date(0).toISOString(),
-        ...input,
-      }
-      envSets.push(row)
-      return row
-    },
-    async envsetList(projectId) {
-      return envSets.filter((e) => e.projectId === projectId)
     },
   }
 }
@@ -151,8 +96,5 @@ export function createTauriDriver(): VaultDriver {
     projectList: () => tauri.projectList(),
     projectGet: (id) => tauri.projectGet(id),
     projectRemove: (id) => tauri.projectRemove(id),
-    projectSetLocalOnly: (id, localOnly) => tauri.projectSetLocalOnly(id, localOnly),
-    envsetUpsert: (input) => tauri.envsetUpsert(input),
-    envsetList: (projectId) => tauri.envsetList(projectId),
   }
 }

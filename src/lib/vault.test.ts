@@ -14,25 +14,22 @@ describe('Vault (memory driver)', () => {
     expect(all[0]?.identity).toBe('github.com/foo/bar')
   })
 
-  it('re-adding an identity updates the folder instead of duplicating', async () => {
+  it('re-adding an identity keeps the original folder instead of re-pointing', async () => {
     const vault = new Vault(createMemoryDriver())
     const a = await vault.addProject({ identity: 'x', displayName: 'x', folderPath: '/a' })
     const b = await vault.addProject({ identity: 'x', displayName: 'x', folderPath: '/b' })
     expect(a.id).toBe(b.id)
-    expect((await vault.listProjects())).toHaveLength(1)
-    expect((await vault.getProject(a.id))?.folderPath).toBe('/b')
+    expect(await vault.listProjects()).toHaveLength(1)
+    // Moving the link silently would point existing snapshots at another repo.
+    expect((await vault.getProject(a.id))?.folderPath).toBe('/a')
   })
 
-  it('removes projects and their env sets, toggles local-only', async () => {
+  it('removes projects without touching anything else', async () => {
     const vault = new Vault(createMemoryDriver())
     const p = await vault.addProject({ identity: 'x', displayName: 'x', folderPath: '/a' })
-    await vault.recordEnvSet(p.id, '.env', 'abc')
-    expect(await vault.listEnvSets(p.id)).toHaveLength(1)
-    const toggled = await vault.setLocalOnly(p.id, true)
-    expect(toggled?.localOnly).toBe(true)
     await vault.removeProject(p.id)
     expect(await vault.listProjects()).toHaveLength(0)
-    expect(await vault.listEnvSets(p.id)).toHaveLength(0)
+    expect(await vault.getProject(p.id)).toBeNull()
   })
 
   it('rejects empty identity / folder', async () => {

@@ -47,26 +47,72 @@ CREATE TABLE IF NOT EXISTS projects (
   identity TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
   folder_path TEXT NOT NULL,
-  local_only INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS env_sets (
-  id TEXT PRIMARY KEY,
-  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-  file_name TEXT NOT NULL,
-  sha256 TEXT NOT NULL DEFAULT '',
-  updated_at TEXT NOT NULL,
-  UNIQUE (project_id, file_name)
+CREATE TABLE IF NOT EXISTS snapshots (
+  id               TEXT PRIMARY KEY,
+  project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  file_name        TEXT NOT NULL,
+  envelope         TEXT NOT NULL,
+  plaintext_sha256 TEXT NOT NULL,
+  source           TEXT NOT NULL,
+  created_at       TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS snapshots_lookup
+  ON snapshots (project_id, file_name, created_at DESC);
 ";
+
+/// Rows kept per `(project_id, file_name)` — recent restore points only.
+const SNAPSHOT_RETENTION: i64 = 20;
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool, String> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![name],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    Ok(count > 0)
+}
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    let mut rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .map_err(|e| format!("vault schema check: {e}"))?;
+    for name in rows.by_ref() {
+        if name.map_err(|e| format!("vault schema check: {e}"))? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 fn db() -> Result<Connection, String> {
     let path = vault_db()?;
     let conn = Connection::open(&path).map_err(|e| format!("open vault.db: {e}"))?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| format!("vault pragma: {e}"))?;
-    conn.execute_batch(SCHEMA)
-        .map_err(|e| format!("vault schema: {e}"))?;
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(|e| format!("vault version: {e}"))?;
+    if version < 1 {
+        // Existing P1 installs carry `local_only` + `env_sets` (row ids and
+        // sha256 only — no secrets). Drop both; snapshots replace them.
+        if table_exists(&conn, "projects")? && column_exists(&conn, "projects", "local_only")? {
+            conn.execute_batch("ALTER TABLE projects DROP COLUMN local_only;")
+                .map_err(|e| format!("vault migration (local_only): {e}"))?;
+        }
+        conn.execute_batch("DROP TABLE IF EXISTS env_sets;")
+            .map_err(|e| format!("vault migration (env_sets): {e}"))?;
+        conn.execute_batch(SCHEMA)
+            .map_err(|e| format!("vault schema: {e}"))?;
+        conn.execute_batch("PRAGMA user_version = 1;")
+            .map_err(|e| format!("vault version: {e}"))?;
+    }
     Ok(conn)
 }
 
@@ -85,18 +131,20 @@ struct ProjectRow {
     identity: String,
     display_name: String,
     folder_path: String,
-    local_only: bool,
     created_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EnvSetRow {
+struct SnapshotRow {
     id: String,
     project_id: String,
     file_name: String,
-    sha256: String,
-    updated_at: String,
+    /// Opaque envelope JSON. Rust never parses, hashes, or decrypts it.
+    envelope: String,
+    plaintext_sha256: String,
+    source: String,
+    created_at: String,
 }
 
 fn new_id() -> String {
@@ -125,15 +173,29 @@ fn new_id() -> String {
     )
 }
 
+fn project_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
+    Ok(ProjectRow {
+        id: r.get(0)?,
+        identity: r.get(1)?,
+        display_name: r.get(2)?,
+        folder_path: r.get(3)?,
+        created_at: r.get(4)?,
+    })
+}
+
+const PROJECT_COLUMNS: &str = "id, identity, display_name, folder_path, created_at";
+
 #[tauri::command]
 fn project_add(identity: String, display_name: String, folder_path: String) -> Result<ProjectRow, String> {
     let conn = db()?;
     let id = new_id();
     let created = now_iso();
+    // Duplicate identities keep their original folder: re-pointing a link
+    // silently would move snapshots to the wrong repo (scan UI explains it).
     conn.execute(
-        "INSERT INTO projects (id, identity, display_name, folder_path, local_only, created_at)
-         VALUES (?1, ?2, ?3, ?4, 0, ?5)
-         ON CONFLICT(identity) DO UPDATE SET folder_path = excluded.folder_path",
+        "INSERT INTO projects (id, identity, display_name, folder_path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(identity) DO NOTHING",
         params![id, identity, display_name, folder_path, created],
     )
     .map_err(|e| format!("project_add: {e}"))?;
@@ -144,19 +206,10 @@ fn project_add(identity: String, display_name: String, folder_path: String) -> R
 fn project_list() -> Result<Vec<ProjectRow>, String> {
     let conn = db()?;
     let mut stmt = conn
-        .prepare("SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects ORDER BY display_name")
+        .prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY display_name"))
         .map_err(|e| format!("project_list: {e}"))?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok(ProjectRow {
-                id: r.get(0)?,
-                identity: r.get(1)?,
-                display_name: r.get(2)?,
-                folder_path: r.get(3)?,
-                local_only: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-            })
-        })
+        .query_map([], project_from_row)
         .map_err(|e| format!("project_list: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("project_list: {e}"))
 }
@@ -164,18 +217,9 @@ fn project_list() -> Result<Vec<ProjectRow>, String> {
 fn project_get_by_identity(identity: String) -> Result<ProjectRow, String> {
     let conn = db()?;
     conn.query_row(
-        "SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects WHERE identity = ?1",
+        &format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE identity = ?1"),
         params![identity],
-        |r| {
-            Ok(ProjectRow {
-                id: r.get(0)?,
-                identity: r.get(1)?,
-                display_name: r.get(2)?,
-                folder_path: r.get(3)?,
-                local_only: r.get::<_, i64>(4)? != 0,
-                created_at: r.get(5)?,
-            })
-        },
+        project_from_row,
     )
     .map_err(|e| format!("project not found: {e}"))
 }
@@ -184,19 +228,11 @@ fn project_get_by_identity(identity: String) -> Result<ProjectRow, String> {
 fn project_get(id: String) -> Result<Option<ProjectRow>, String> {
     let conn = db()?;
     let mut stmt = conn
-        .prepare("SELECT id, identity, display_name, folder_path, local_only, created_at FROM projects WHERE id = ?1")
+        .prepare(&format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1"))
         .map_err(|e| format!("project_get: {e}"))?;
-    let mut rows = stmt.query_map(params![id], |r| {
-        Ok(ProjectRow {
-            id: r.get(0)?,
-            identity: r.get(1)?,
-            display_name: r.get(2)?,
-            folder_path: r.get(3)?,
-            local_only: r.get::<_, i64>(4)? != 0,
-            created_at: r.get(5)?,
-        })
-    })
-    .map_err(|e| format!("project_get: {e}"))?;
+    let mut rows = stmt
+        .query_map(params![id], project_from_row)
+        .map_err(|e| format!("project_get: {e}"))?;
     match rows.next() {
         Some(r) => r.map(Some).map_err(|e| format!("project_get: {e}")),
         None => Ok(None),
@@ -208,70 +244,110 @@ fn project_get(id: String) -> Result<Option<ProjectRow>, String> {
 #[tauri::command]
 fn project_remove(id: String) -> Result<(), String> {
     let conn = db()?;
-    conn.execute("DELETE FROM env_sets WHERE project_id = ?1", params![id])
+    // Explicit delete keeps the vault tidy even if an old connection ran
+    // without `PRAGMA foreign_keys = ON`.
+    conn.execute("DELETE FROM snapshots WHERE project_id = ?1", params![id])
         .map_err(|e| format!("project_remove: {e}"))?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])
         .map_err(|e| format!("project_remove: {e}"))?;
     Ok(())
 }
 
-#[tauri::command]
-fn project_set_local_only(id: String, local_only: bool) -> Result<(), String> {
-    let conn = db()?;
-    conn.execute(
-        "UPDATE projects SET local_only = ?1 WHERE id = ?2",
-        params![if local_only { 1 } else { 0 }, id],
-    )
-    .map_err(|e| format!("project_set_local_only: {e}"))?;
-    Ok(())
+const SNAPSHOT_COLUMNS: &str =
+    "id, project_id, file_name, envelope, plaintext_sha256, source, created_at";
+
+fn snapshot_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SnapshotRow> {
+    Ok(SnapshotRow {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        file_name: r.get(2)?,
+        envelope: r.get(3)?,
+        plaintext_sha256: r.get(4)?,
+        source: r.get(5)?,
+        created_at: r.get(6)?,
+    })
 }
 
+/// Append one encrypted snapshot, keeping only the newest 20 per file.
 #[tauri::command]
-fn envset_upsert(project_id: String, file_name: String, sha256: String) -> Result<EnvSetRow, String> {
+fn snapshot_put(
+    project_id: String,
+    file_name: String,
+    envelope: String,
+    plaintext_sha256: String,
+    source: String,
+) -> Result<SnapshotRow, String> {
     let conn = db()?;
     let id = new_id();
-    let updated = now_iso();
+    let created = now_iso();
     conn.execute(
-        "INSERT INTO env_sets (id, project_id, file_name, sha256, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(project_id, file_name) DO UPDATE SET sha256 = excluded.sha256, updated_at = excluded.updated_at",
-        params![id, project_id, file_name, sha256, updated],
+        "INSERT INTO snapshots (id, project_id, file_name, envelope, plaintext_sha256, source, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, project_id, file_name, envelope, plaintext_sha256, source, created],
     )
-    .map_err(|e| format!("envset_upsert: {e}"))?;
+    .map_err(|e| format!("snapshot_put: {e}"))?;
+    conn.execute(
+        "DELETE FROM snapshots
+         WHERE project_id = ?1 AND file_name = ?2
+           AND id NOT IN (
+             SELECT id FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT ?3
+           )",
+        params![project_id, file_name, SNAPSHOT_RETENTION],
+    )
+    .map_err(|e| format!("snapshot_put retention: {e}"))?;
     conn.query_row(
-        "SELECT id, project_id, file_name, sha256, updated_at FROM env_sets WHERE project_id = ?1 AND file_name = ?2",
-        params![project_id, file_name],
-        |r| {
-            Ok(EnvSetRow {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                file_name: r.get(2)?,
-                sha256: r.get(3)?,
-                updated_at: r.get(4)?,
-            })
-        },
+        &format!("SELECT {SNAPSHOT_COLUMNS} FROM snapshots WHERE id = ?1"),
+        params![id],
+        snapshot_from_row,
     )
-    .map_err(|e| format!("envset_upsert: {e}"))
+    .map_err(|e| format!("snapshot_put: {e}"))
 }
 
 #[tauri::command]
-fn envset_list(project_id: String) -> Result<Vec<EnvSetRow>, String> {
+fn snapshot_latest(project_id: String, file_name: String) -> Result<Option<SnapshotRow>, String> {
     let conn = db()?;
+    let row = conn.query_row(
+        &format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT 1"
+        ),
+        params![project_id, file_name],
+        snapshot_from_row,
+    );
+    match row {
+        Ok(row) => Ok(Some(row)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(format!("snapshot_latest: {e}")),
+    }
+}
+
+#[tauri::command]
+fn snapshot_list(project_id: String, file_name: String, limit: u32) -> Result<Vec<SnapshotRow>, String> {
+    let conn = db()?;
+    let limit = if limit == 0 { SNAPSHOT_RETENTION } else { limit as i64 };
     let mut stmt = conn
-        .prepare("SELECT id, project_id, file_name, sha256, updated_at FROM env_sets WHERE project_id = ?1 ORDER BY file_name")
-        .map_err(|e| format!("envset_list: {e}"))?;
+        .prepare(&format!(
+            "SELECT {SNAPSHOT_COLUMNS} FROM snapshots
+             WHERE project_id = ?1 AND file_name = ?2
+             ORDER BY created_at DESC, rowid DESC LIMIT ?3"
+        ))
+        .map_err(|e| format!("snapshot_list: {e}"))?;
     let rows = stmt
-        .query_map(params![project_id], |r| {
-            Ok(EnvSetRow {
-                id: r.get(0)?,
-                project_id: r.get(1)?,
-                file_name: r.get(2)?,
-                sha256: r.get(3)?,
-                updated_at: r.get(4)?,
-            })
-        })
-        .map_err(|e| format!("envset_list: {e}"))?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("envset_list: {e}"))
+        .query_map(params![project_id, file_name, limit], snapshot_from_row)
+        .map_err(|e| format!("snapshot_list: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("snapshot_list: {e}"))
+}
+
+#[tauri::command]
+fn snapshot_delete(id: String) -> Result<(), String> {
+    let conn = db()?;
+    conn.execute("DELETE FROM snapshots WHERE id = ?1", params![id])
+        .map_err(|e| format!("snapshot_delete: {e}"))?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -450,9 +526,10 @@ fn main() {
             project_list,
             project_get,
             project_remove,
-            project_set_local_only,
-            envset_upsert,
-            envset_list,
+            snapshot_put,
+            snapshot_latest,
+            snapshot_list,
+            snapshot_delete,
             links_read,
             links_write,
             config_read,

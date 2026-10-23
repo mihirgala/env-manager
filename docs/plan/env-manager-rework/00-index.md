@@ -79,7 +79,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 
 - [x] 1. Remove hosted backend + pnpm only
 - [x] 2. Portable crypto
-- [ ] 3. SQLite vault + snapshots
+- [x] 3. SQLite vault + snapshots
 - [ ] 4. Import/export bundles
 - [ ] 5. Parent-folder scan
 - [ ] 6. Screens rewiring
@@ -98,6 +98,12 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   fileName as AEAD AAD), envelope `v: 2`, recovery blob stays `v: 1`. Added
   `encryptFile` / `decryptFile` / `decryptFileWithPassphrase`; removed project-id keying.
   `pnpm test src/lib/crypto.test.ts` (12) + `pnpm build` green.
+- **2026-10-23 — step 3 done.** Vault schema v1 (`PRAGMA user_version`) replaces `env_sets`
+  with append-only `snapshots` (envelope text + local sha, 20-row retention) and drops
+  `local_only`; added `snapshot_put/latest/list/delete`, `src/lib/store.ts`, rewrote
+  `sync.ts` around `backupToVault` / `planRestore` / `applyRestore` with four statuses, and
+  auto-backup after save when unlocked. `pnpm test` (41) + `pnpm build` green; Rust not
+  compiled locally (cargo absent) — CI validates the Tauri build.
 
 ## Environment notes
 

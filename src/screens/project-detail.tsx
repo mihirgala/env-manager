@@ -6,8 +6,10 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { useToast } from '@/components/toaster'
+import { isUnlocked } from '@/lib/crypto'
 import { effectiveValue, getValue, parse, serialize, setValue, type DotenvDocument } from '@/lib/dotenv'
-import { sha256Hex } from '@/lib/hash'
+import { createTauriStore } from '@/lib/store'
+import { backupToVault, type SyncContext } from '@/lib/sync'
 import { isTauri, backupEnvFile, fileStat, listEnvFiles, readEnvFile, writeEnvFile } from '@/lib/tauri'
 import { Vault, createTauriDriver, type ProjectRecord } from '@/lib/vault'
 import { cn } from '@/lib/utils'
@@ -31,6 +33,13 @@ export function ProjectDetailScreen(): React.JSX.Element {
   const navigate = useNavigate()
   const toast = useToast()
   const vault = React.useMemo(() => new Vault(createTauriDriver()), [])
+  const sync = React.useMemo<SyncContext>(
+    () => ({
+      store: createTauriStore(),
+      io: { readFile: readEnvFile, writeFile: writeEnvFile, backupFile: backupEnvFile },
+    }),
+    [],
+  )
 
   const [project, setProject] = React.useState<ProjectRecord | null>(null)
   const [files, setFiles] = React.useState<string[]>([])
@@ -52,9 +61,8 @@ export function ProjectDetailScreen(): React.JSX.Element {
       setSavedText(content)
       setDiskText(content)
       setChangedOnDisk(false)
-      await vault.recordEnvSet(p.id, fileName, await sha256Hex(content))
     },
-    [vault],
+    [],
   )
 
   React.useEffect(() => {
@@ -146,12 +154,27 @@ export function ProjectDetailScreen(): React.JSX.Element {
     setError('')
     try {
       const text = serialize(doc)
-      await writeEnvFile(joinPath(project.folderPath, file), text)
+      const path = joinPath(project.folderPath, file)
+      await writeEnvFile(path, text)
       setSavedText(text)
       setDiskText(text)
       setChangedOnDisk(false)
-      await vault.recordEnvSet(project.id, file, await sha256Hex(text))
-      toast('Saved — file on disk updated losslessly.')
+      // Never block the disk write on crypto: save first, then back up.
+      if (!isUnlocked()) {
+        toast('Saved — unlock to back up.')
+        return
+      }
+      try {
+        await backupToVault(sync, {
+          projectId: project.id,
+          identity: project.identity,
+          filePath: path,
+          fileName: file,
+        })
+        toast('Saved and backed up.')
+      } catch (err) {
+        toast(`Saved — backup failed: ${err instanceof Error ? err.message : 'unknown error'}`, 'error')
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Save failed')
     } finally {

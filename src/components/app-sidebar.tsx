@@ -10,7 +10,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuItem,
   sidebarMenuButtonClass,
   useSidebar,
@@ -145,7 +144,6 @@ function ProjectShortcuts(): React.JSX.Element {
                     {p.displayName.slice(0, 1).toUpperCase()}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{p.displayName}</span>
-                  {p.localOnly && <SidebarMenuBadge>local</SidebarMenuBadge>}
                 </NavLink>
               </SidebarMenuItem>
             ))}
