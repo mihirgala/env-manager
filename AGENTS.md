@@ -4,55 +4,100 @@ GUI-only, local-first env manager. Tauri v2 + Vite React + TypeScript. Open sour
 
 ## Stack
 
-- Frontend: Vite React + TypeScript in `src/` (planned). Product logic lives in `src/lib/` (identity, dotenv, vault, crypto, sync) so it stays testable without Rust.
-- Backend: Tauri v2 Rust in `src-tauri/` — thin only: fs read/write, `git remote get-url`, file watcher, SQLite rows, dialogs. No crypto or product logic in Rust.
-- Storage: local encrypted vault in `~/.env-manager/vault.db`. No server, no accounts, no network calls.
-- Crypto: libsodium in TS (`libsodium-wrappers`) — Argon2id → master key → per-project DEKs (XChaCha20-Poly1305).
+- Frontend: Vite React + TypeScript in `src/`. Product logic lives in `src/lib/` — `identity`,
+  `dotenv`, `crypto`, `vault`, `store`, `sync`, `bundle`, `scan`, `env-files`, `theme`, `paths`,
+  `config` — so it stays testable without Rust.
+- Backend: Tauri v2 Rust in `src-tauri/` — thin only: fs read/write, `git remote get-url`, file
+  stats, opaque SQLite snapshot rows, dialogs, and the read-only parent-folder scan walk. No
+  crypto, parsing, sync policy, or ignore-rule policy in Rust.
+- Storage: local SQLite vault at `~/.env-manager/vault.db` (projects + append-only encrypted
+  snapshots), plus `links.json` / `config.json` metadata. No server, no accounts, no network calls.
+- Crypto: libsodium in TS (`libsodium-wrappers-sumo`) — passphrase → Argon2id → master key →
+  portable per-file DEKs (`BLAKE2b(master, "identity:fileName")`) → XChaCha20-Poly1305 with the
+  file name as additional data.
 
 ## Commands
 
 ```powershell
 pnpm install
-pnpm dev        # Vite frontend only, no Rust needed
-pnpm tauri dev  # full desktop app (needs Rust + Tauri system deps)
-pnpm build      # must pass before opening a PR
+pnpm dev          # Vite frontend only, no Rust needed
+pnpm test         # vitest unit tests
+pnpm build        # typecheck + production bundle — must pass before a PR
+pnpm tauri dev    # full desktop app (needs Rust + Tauri system deps)
+pnpm tauri build  # installers for the host OS only
 ```
 
-Rust is optional in most dev environments. `dev` / `build` work without it; only `tauri dev` / `tauri build` need it.
+Rust is optional for most frontend work. `dev`, `test`, and `build` work without it; only
+`tauri dev` / `tauri build` need the Rust toolchain.
 
-## Structure (target)
+## Structure
 
 ```
-src/               # Vite React UI + src/lib (identity, dotenv, vault, crypto, sync)
-src-tauri/         # Rust backend: fs, git, watcher, SQLite rows (thin)
-docs/              # roadmap, architecture notes
-.opencode/skills/  # agent skills (responsive-design, repo-rules)
-src/lib/__fixtures__/  # dotenv fixtures for tests — never real secrets
+src/                  # Vite React UI + src/lib (identity, dotenv, crypto, vault, store, sync,
+                      # bundle, scan, env-files, theme, paths, config)
+src-tauri/            # thin Rust: fs, git remote, file stats, SQLite rows, dialogs, scan walk
+docs/                 # architecture, roadmap
+docs/DISTRIBUTION.md  # artifacts, unsigned install, signing, checksums
+docs/plan/            # step-by-step rework plan (historical)
+.opencode/skills/     # agent skills (responsive-design, repo-rules)
+src/lib/__fixtures__/ # dotenv fixtures for tests — never real secrets
 ```
 
 ## Rules (must follow)
 
-1. **No lock-in, ever.** `.env` stays source of truth on disk. App is a sidecar. Never add files, deps, or code to target user projects. Never write `env-manager.json` into a repo.
-2. **Never commit secrets.** No real `.env` files. Use fixtures under `src/lib/__fixtures__/` only. Tests must use temp dirs / fixtures, never touch real user repos.
-3. **Lossless dotenv.** Parser in `src/lib` must preserve comments, order, quoting, blank lines. Only values change on pull. Round-trip tests required.
-4. **Thin Rust.** All product logic in TS. Rust does FS + git-remote + watcher + SQLite rows + dialogs only.
-5. **Zero-knowledge.** Passphrase / master key / plaintext never leave the device, never
-   logged. Encrypted snapshots store `{ salt, nonce, ciphertext }` + `plaintext_sha256`
-   for conflict detection only, inside the local vault.
-6. **No account, no server.** Sync is manual: encrypted `.envmgr` bundles the user moves by hand. Uninstall / unlink / export must leave `.env` files intact.
-7. **Project identity.** Normalize `git remote origin` (`git@github.com:Foo/bar.git` and `https://github.com/foo/bar` → `github.com/foo/bar`). Fallback: manual UUID link in `~/.env-manager/links.json`, never in the repo.
-8. **GUI-only.** No CLI. All flows are buttons/screens: Add Project (folder picker), Push/Pull with diff preview, status badges (`clean | behind | ahead | diverged | local-only`), Settings → Export / Remove (keeps `.env`).
-9. **Responsive UI.** All screens must follow `.opencode/skills/responsive-design/SKILL.md` — fluid layouts, min 360px width, 44px touch targets, no fixed-px page widths. Load that skill for any UI work.
-10. **Repo guardrails.** Load `.opencode/skills/repo-rules/SKILL.md` for security + no-lock-in checklists before pushing cloud/sync code.
+1. **No lock-in, ever.** `.env` stays the source of truth on disk. The app is a sidecar. Never add
+   files, deps, or code to target user projects. Never write `env-manager.json` into a repo.
+2. **Never commit secrets.** No real `.env` files, `vault.db`, `*.envmgr`, `*.backup-*`, tokens, or
+   passphrases. Use fixtures under `src/lib/__fixtures__/` only; no template env files. Tests must
+   use temp dirs / fixtures, never real user repos.
+3. **Lossless dotenv.** The parser in `src/lib` must preserve comments, order, quoting, blank lines,
+   and `export` prefixes. Only values change on save. Round-trip tests are required.
+4. **Thin Rust.** All product logic is in TS. Rust does FS, `git remote get-url`, file stats,
+   opaque SQLite rows, dialogs, and the read-only scan walk only. No crypto, dotenv parsing, sync
+   policy, or file-name filtering in Rust.
+5. **Zero-knowledge.** The passphrase, master key, DEKs, and plaintext never leave the device, are
+   never logged, and are never stored. The vault stores `{ v, salt, nonce, algo, ciphertext }`
+   envelopes plus a local `plaintext_sha256` for conflict detection only. Bundles carry ciphertext
+   and no hashes.
+6. **No account, no server.** Sync is manual: encrypted `.envmgr` bundles the user moves by hand.
+   There is no per-project opt-out. Uninstall / unlink / export must leave `.env` files intact.
+7. **Project identity.** Normalize `git remote origin` (`git@github.com:Foo/bar.git` and
+   `https://github.com/foo/bar` → `github.com/foo/bar`). Monorepos use `identity::subpath`.
+   Fallback: manual UUID link in `~/.env-manager/links.json`, never in the repo.
+8. **GUI-only.** No CLI. Flows are buttons/screens: Add Project (folder picker), Scan a parent
+   folder (read-only, bulk add), status badges (`locked | not-backed-up | backed-up | changed`),
+   Back up now, Restore with diff, encrypted bundle export/import, plaintext escape hatch, and
+   Settings → Remove (keeps `.env`). No push/pull, no cloud account.
+9. **Responsive + dark parity.** All screens must follow
+   `.opencode/skills/responsive-design/SKILL.md` — fluid layouts, 360px minimum, 44px targets, no
+   fixed-px page widths. Both light and dark themes are required deliverables.
+10. **Repo guardrails + pnpm.** Load `.opencode/skills/repo-rules/SKILL.md` for security and
+    no-lock-in checklists before touching vault, crypto, sync, scan, or Rust code. Use `pnpm` only.
 
 ## Conventions
 
 - TypeScript strict. Functional React components + hooks. No class components.
-- Keep `src/lib` pure (no Tauri imports) so it runs in Vite + tests. Tauri calls go through a thin adapter.
-- On pull conflict: never silent overwrite — prompt with diff, backup to `.env.backup-<ts>`.
-- Commit scope: `pnpm build` green, no `.env` / `vault.db` / `cache/` committed.
+- Keep `src/lib` pure (no static `@tauri-apps/*` imports) so it runs in Vite + tests. Tauri calls go
+  through `src/lib/tauri.ts`.
+- On restore/import: never silent overwrite — show a diff and write `.env.backup-<ts>` before the
+  new content.
+- Snapshots are append-only with per-file retention. Status is computed locally from the latest
+  snapshot + the current file hash.
+- Commit scope: `pnpm build` and `pnpm test` green, no `.env` / `vault.db` / `*.envmgr` /
+  `*.backup-*` / `src-tauri/target/` committed.
+
+## Packaging
+
+- Target version **0.1.0**, first distributable build.
+- Installers are unsigned for now; macOS ships a universal binary. See
+  [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+- CI builds per host OS (Tauri does not cross-compile). Signing material belongs in CI secrets only —
+  never in the repo.
+- Version bumps: `package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, then a
+  `v0.1.0` tag.
 
 ## External instructions
 
-- Crypto/sync details: see `README.md` (How it works) until `docs/ARCHITECTURE.md` exists.
-- Roadmap phases: P0 scaffold → P1 local → P2 cloud E2E → P3 polish.
+- Product + security details: [README.md](README.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+- Distribution: [docs/DISTRIBUTION.md](docs/DISTRIBUTION.md).
+- Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md).

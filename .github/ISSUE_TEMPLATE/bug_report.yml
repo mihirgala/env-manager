@@ -13,7 +13,7 @@ body:
     id: version
     attributes:
       label: App version
-      description: e.g. v0.3, or the commit hash you built from
+      description: e.g. v0.1.0, or the commit hash you built from
   - type: checkboxes
     id: lockin
     attributes:

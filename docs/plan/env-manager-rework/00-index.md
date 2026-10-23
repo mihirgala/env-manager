@@ -84,7 +84,7 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
 - [x] 5. Parent-folder scan
 - [x] 6. Screens rewiring
 - [x] 7. Dark mode
-- [ ] 8. Skills + docs
+- [x] 8. Skills + docs
 - [ ] 9. Packaging + CI
 - [ ] 10. Verification
 
@@ -128,6 +128,12 @@ See [11-decisions-log.md](11-decisions-log.md) for rationale and open items.
   script + `color-scheme` meta. `core:window:allow-set-theme` granted. `pnpm test` (70) +
   `pnpm build` green; native title-bar + 360px visual checks remain manual/CI (no desktop
   browser or cargo here).
+- **2026-10-23 — step 8 done.** Rewrote `AGENTS.md`, README, CONTRIBUTING, ARCHITECTURE,
+  ROADMAP, repo-rules + responsive-design skills, and the PR/issue templates for the SQLite-only
+  app, pnpm, bundles, scan, and dark mode. Added `docs/DISTRIBUTION.md` (artifacts, unsigned
+  installs, signing vars, checksums, release checklist, CI outline). Doc grep for
+  supabase/rls/keychain/npm run/npx vitest/template env files is zero; `pnpm test` (70) +
+  `pnpm build` green.
 
 ## Environment notes
 
